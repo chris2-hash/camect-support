@@ -164,6 +164,18 @@ tr:hover td { background:var(--surface); }
 .rowActions button:hover { border-color:var(--border); color:var(--text); }
 .rowActions button.del:hover { border-color:var(--danger); color:var(--danger); }
 
+/* Customer typeahead */
+.custSearch { position:relative; }
+.custSearchInput { width:100%; padding-right:28px; }
+.custClear { position:absolute; right:8px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--muted); font-size:15px; padding:0; line-height:1; cursor:pointer; }
+.custClear:hover { color:var(--text); }
+.custDropdown { position:absolute; left:0; right:0; top:calc(100% + 3px); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); z-index:200; max-height:200px; overflow-y:auto; box-shadow:0 4px 16px rgba(0,0,0,.25); }
+.custOption { padding:8px 12px; cursor:pointer; font-size:13px; }
+.custOption:hover, .custOption.focused { background:var(--surface2); }
+.custOption .custOptSub { font-size:11px; color:var(--muted); margin-top:1px; font-family:monospace; }
+.custNoResults { padding:10px 12px; font-size:13px; color:var(--muted); }
+.custSelected { background:color-mix(in srgb,var(--accent) 12%,transparent); border-color:var(--accent) !important; }
+
 /* Modal */
 #modalOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; }
 #modalOverlay.open { display:flex; }
@@ -525,7 +537,14 @@ async function openTicketModal(id) {
           Customer
           <button type="button" id="newCustToggle" class="btn btn-sm" style="padding:1px 8px;font-size:11px" onclick="toggleNewCustForm()">+ New</button>
         </label>
-        <select id="mCustomer"><option value="">— None —</option>${custOpts}</select>
+        <input type="hidden" id="mCustomer" value="${t?.customerId||''}">
+        <div class="custSearch">
+          <input id="mCustSearch" class="custSearchInput${t?.customerName?' custSelected':''}" placeholder="Search customers…"
+            value="${t?.customerName?esc(t.customerName):''}"
+            oninput="onCustSearch()" onkeydown="onCustKey(event)" autocomplete="off">
+          <button type="button" class="custClear" id="mCustClear" style="${t?.customerName?'':'display:none'}" onclick="clearCustSearch()">✕</button>
+          <div class="custDropdown" id="mCustDropdown" style="display:none"></div>
+        </div>
         <div id="newCustForm" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)">
           <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">New Customer</div>
           <div class="field" style="margin-bottom:8px"><input id="ncName" placeholder="Name *"></div>
@@ -713,6 +732,87 @@ function fmtSize(b) { return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(
 function fmtStatus(s) { return s==='in_progress'?'In Progress':s[0].toUpperCase()+s.slice(1); }
 function fmtCat(c) { const m={hub:'Hub',camera:'Camera',network:'Network',software:'Software',account:'Account',billing:'Billing',other:'Other'}; return m[c]||c; }
 
+// ── Customer typeahead (inside ticket modal) ──────────────────────────────
+let custFocusIdx = -1;
+
+function onCustSearch() {
+  custFocusIdx = -1;
+  const q = document.getElementById('mCustSearch').value.trim().toLowerCase();
+  // Clear selection if user edits text
+  document.getElementById('mCustomer').value = '';
+  document.getElementById('mCustSearch').classList.remove('custSelected');
+  document.getElementById('mCustClear').style.display = 'none';
+  if (!q) { closeCustDropdown(); return; }
+  const results = customers.filter(c =>
+    c.name.toLowerCase().includes(q) ||
+    (c.hubId && c.hubId.toLowerCase().includes(q)) ||
+    (c.email && c.email.toLowerCase().includes(q))
+  );
+  showCustDropdown(results);
+}
+
+function showCustDropdown(results) {
+  const dd = document.getElementById('mCustDropdown');
+  if (!results.length) {
+    dd.innerHTML = '<div class="custNoResults">No customers found</div>';
+  } else {
+    dd.innerHTML = results.map((c, i) =>
+      `<div class="custOption" data-id="${c.id}" data-name="${esc(c.name)}" data-idx="${i}"
+        onmousedown="pickCust('${c.id}','${esc(c.name)}')"
+        onmouseover="setCustFocus(${i})">
+        ${esc(c.name)}
+        ${c.hubId ? `<div class="custOptSub">${esc(c.hubId)}</div>` : ''}
+      </div>`
+    ).join('');
+  }
+  dd.style.display = '';
+}
+
+function closeCustDropdown() {
+  const dd = document.getElementById('mCustDropdown');
+  if (dd) dd.style.display = 'none';
+  custFocusIdx = -1;
+}
+
+function pickCust(id, name) {
+  document.getElementById('mCustomer').value = id;
+  document.getElementById('mCustSearch').value = name;
+  document.getElementById('mCustSearch').classList.add('custSelected');
+  document.getElementById('mCustClear').style.display = '';
+  closeCustDropdown();
+}
+
+function clearCustSearch() {
+  document.getElementById('mCustomer').value = '';
+  document.getElementById('mCustSearch').value = '';
+  document.getElementById('mCustSearch').classList.remove('custSelected');
+  document.getElementById('mCustClear').style.display = 'none';
+  closeCustDropdown();
+  document.getElementById('mCustSearch').focus();
+}
+
+function setCustFocus(idx) {
+  custFocusIdx = idx;
+  document.querySelectorAll('#mCustDropdown .custOption').forEach((el, i) =>
+    el.classList.toggle('focused', i === idx));
+}
+
+function onCustKey(e) {
+  const dd = document.getElementById('mCustDropdown');
+  if (!dd || dd.style.display === 'none') return;
+  const opts = dd.querySelectorAll('.custOption[data-id]');
+  if (!opts.length) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); setCustFocus(Math.min(custFocusIdx + 1, opts.length - 1)); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); setCustFocus(Math.max(custFocusIdx - 1, 0)); }
+  else if (e.key === 'Enter' && custFocusIdx >= 0) { e.preventDefault(); const o = opts[custFocusIdx]; pickCust(o.dataset.id, o.dataset.name); }
+  else if (e.key === 'Escape') { closeCustDropdown(); }
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', e => {
+  if (!e.target.closest('.custSearch')) closeCustDropdown();
+});
+
 // ── Inline customer creation (inside ticket modal) ────────────────────────
 function toggleNewCustForm() {
   const form = document.getElementById('newCustForm');
@@ -735,10 +835,8 @@ async function createCustomerInline() {
       phone: document.getElementById('ncPhone').value.trim(),
     });
     customers.push(c);
-    // Add to select and pick it
-    const sel = document.getElementById('mCustomer');
-    const opt = new Option(c.name, c.id, true, true);
-    sel.appendChild(opt);
+    // Select the new customer in the typeahead
+    pickCust(c.id, c.name);
     // Reset and close the sub-form
     ['ncName','ncHub','ncEmail','ncPhone'].forEach(id => document.getElementById(id).value = '');
     toggleNewCustForm();
