@@ -7,6 +7,7 @@ const path   = require('path');
 const crypto = require('crypto');
 const net    = require('net');
 const tls    = require('tls');
+const https  = require('https');
 
 const PORT           = parseInt(process.argv[2]) || 3000;
 const TICKETS_FILE   = path.join(__dirname, 'tickets.json');
@@ -22,6 +23,7 @@ const DEFAULT_SETTINGS = {
   smtp:   { enabled: false, host: '', port: 587, secure: false, user: '', password: '', from: '' },
   sla:    { urgent: 4, high: 8, normal: 24, low: 72 },
   notify: { onCreate: true, onAssign: true, onComment: true, onStatus: true },
+  ai:     { apiKey: '', model: 'claude-haiku-4-5-20251001' },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ let settings = {
   smtp:   { ...DEFAULT_SETTINGS.smtp,   ...(rawSettings.smtp   || {}) },
   sla:    { ...DEFAULT_SETTINGS.sla,    ...(rawSettings.sla    || {}) },
   notify: { ...DEFAULT_SETTINGS.notify, ...(rawSettings.notify || {}) },
+  ai:     { ...DEFAULT_SETTINGS.ai,     ...(rawSettings.ai     || {}) },
 };
 
 let nextSeq    = tickets.reduce((m, t) => Math.max(m, t.seq || 0), 0) + 1;
@@ -233,6 +236,56 @@ async function notifyTicket(event, ticket, extra = {}) {
   } catch (e) {
     console.error('[Email] Failed:', e.message);
   }
+}
+
+// ── AI Diagnosis ──────────────────────────────────────────────────────────
+
+async function callClaude(apiKey, model, report, ticket) {
+  const system = `You are a Camect hub support engineer. Diagnose hub bug reports and logs.
+Ticket: ${ticket.title} | Priority: ${ticket.priority} | Category: ${ticket.category}${ticket.description ? '\nDescription: ' + ticket.description : ''}
+
+Respond with three sections:
+**Root Cause** — what is causing the issue
+**Affected Components** — which parts of the system are involved
+**Resolution Steps** — numbered, actionable steps to fix the issue
+
+Be concise and specific to Camect hub hardware and software.`;
+
+  const payload = JSON.stringify({
+    model: model || 'claude-haiku-4-5-20251001',
+    max_tokens: 1024,
+    system,
+    messages: [{ role: 'user', content: 'Hub bug report / log:\n\n' + report }],
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(payload),
+      },
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) return reject(new Error(parsed.error.message || 'API error'));
+          const text = parsed.content?.[0]?.text;
+          if (!text) return reject(new Error('Empty response from Claude API'));
+          resolve(text);
+        } catch (e) { reject(new Error('Failed to parse Claude API response')); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 // ── Timeline helper ───────────────────────────────────────────────────────
@@ -490,6 +543,28 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, target: dst });
   }
 
+  // ── AI Diagnose ────────────────────────────────────────────────────────
+
+  const mDiagnose = pathname.match(/^\/tickets\/([^/]+)\/diagnose$/);
+  if (mDiagnose && method === 'POST') {
+    const t = tickets.find(t => t.id === mDiagnose[1]);
+    if (!t) return json(res, 404, { error: 'Not found' });
+    const b = JSON.parse((await readBody(req)).toString() || '{}');
+    if (!b.report?.trim()) return json(res, 400, { error: 'Report text required' });
+    if (!settings.ai?.apiKey) return json(res, 400, { error: 'Claude API key not configured. Add it in Settings → AI Diagnosis.' });
+    try {
+      const diagnosis = await callClaude(settings.ai.apiKey, settings.ai.model, b.report.trim(), t);
+      const entry = tl(sess, 'note', '🤖 AI Diagnosis:\n\n' + diagnosis, { isNote: true });
+      t.timeline.push(entry);
+      t.updatedTs = Date.now();
+      save(TICKETS_FILE, tickets);
+      ssePublish('ticket.updated', { ticket: t });
+      return json(res, 200, { diagnosis, entry });
+    } catch (e) {
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   // ── Attachments ────────────────────────────────────────────────────────
 
   const mAttach = pathname.match(/^\/tickets\/([^/]+)\/attachments$/);
@@ -651,6 +726,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET') {
       const safe = JSON.parse(JSON.stringify(settings));
       if (safe.smtp?.password) safe.smtp.password = '••••••••';
+      if (safe.ai?.apiKey)     safe.ai.apiKey     = '••••••••';
       return json(res, 200, safe);
     }
     if (method === 'PUT') {
@@ -662,6 +738,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (b.sla)    Object.assign(settings.sla,    b.sla);
       if (b.notify) Object.assign(settings.notify, b.notify);
+      if (b.ai) {
+        const { apiKey, ...rest } = b.ai;
+        Object.assign(settings.ai, rest);
+        if (apiKey && apiKey !== '••••••••') settings.ai.apiKey = apiKey;
+      }
       save(SETTINGS_FILE, settings);
       return json(res, 200, { ok: true });
     }

@@ -403,6 +403,7 @@ tr:hover td { background:var(--surface2); }
           <button class="tab" onclick="setTab(this,'tabSla')">SLA &amp; Notifications</button>
           <button class="tab" onclick="setTab(this,'tabCanned')">Canned Responses</button>
           <button class="tab" onclick="setTab(this,'tabTemplates')">Templates</button>
+          <button class="tab" onclick="setTab(this,'tabAI')">AI Diagnosis</button>
         </div>
         <div id="tabEmail" class="tabPanel active">
           <div class="detailCard">
@@ -466,6 +467,26 @@ tr:hover td { background:var(--surface2); }
           <div class="detailCard">
             <table><thead><tr><th>Name</th><th>Title</th><th>Priority</th><th>Category</th><th></th></tr></thead>
             <tbody id="tplTableBody"></tbody></table>
+          </div>
+        </div>
+        <div id="tabAI" class="tabPanel">
+          <div class="detailCard">
+            <h4>Claude AI Diagnosis</h4>
+            <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+              Paste a Camect hub bug report into any ticket and Claude will diagnose the root cause and suggest resolution steps. The diagnosis is posted as an internal note on the ticket.
+            </p>
+            <div class="formGroup">
+              <label>Anthropic API Key</label>
+              <input id="aiApiKey" type="password" placeholder="sk-ant-…">
+            </div>
+            <div class="formGroup">
+              <label>Model</label>
+              <select id="aiModel">
+                <option value="claude-haiku-4-5-20251001">Claude Haiku (fast, economical)</option>
+                <option value="claude-sonnet-4-6">Claude Sonnet (more thorough)</option>
+              </select>
+            </div>
+            <button class="btn primary" onclick="saveAI()">Save</button>
           </div>
         </div>
       </div>
@@ -966,6 +987,20 @@ function renderDetail(t) {
             <button class="btn ghost sm" onclick="uploadAttachment()">Upload</button>
           </div>
         </div>
+        <div class="detailCard" id="diagnoseCard">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:0">
+            <h4 style="margin-bottom:0">🤖 AI Diagnosis</h4>
+            <button class="btn ghost sm" onclick="toggleDiagnosePanel()" id="diagnosePanelBtn">Expand</button>
+          </div>
+          <div id="diagnosePanel" style="display:none;margin-top:14px">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Paste a hub bug report or log output below. Claude will diagnose the issue and post the result as an internal note.</p>
+            <textarea id="diagnoseInput" style="width:100%;min-height:140px;padding:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-size:12px;font-family:monospace;resize:vertical" placeholder="Paste hub log / bug report here…"></textarea>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+              <button class="btn primary" id="diagnoseBtn" onclick="runDiagnosis()">Diagnose</button>
+              <span id="diagnoseStatus" style="font-size:12px;color:var(--muted)"></span>
+            </div>
+          </div>
+        </div>
         <div class="detailCard">
           <h4>Activity</h4>
           <div id="timeline">${(t.timeline||[]).slice().reverse().map(tlEntry).join('')}</div>
@@ -1359,6 +1394,8 @@ async function loadSettings() {
   document.getElementById('notifyAssign').checked =!!r.notify.onAssign;
   document.getElementById('notifyComment').checked=!!r.notify.onComment;
   document.getElementById('notifyStatus').checked =!!r.notify.onStatus;
+  document.getElementById('aiApiKey').value='';
+  document.getElementById('aiModel').value=r.ai?.model||'claude-haiku-4-5-20251001';
   loadCannedTable(); loadTplTable();
 }
 function setTab(btn,panelId) {
@@ -1481,6 +1518,45 @@ async function saveTplItem() {
 async function deleteTpl(id) {
   if (!confirm('Delete this template?')) return;
   await api('DELETE','/templates/'+id); loadTplTable();
+}
+
+// ── AI Diagnosis ──────────────────────────────────────────────────────────
+function toggleDiagnosePanel() {
+  const panel=document.getElementById('diagnosePanel');
+  const btn=document.getElementById('diagnosePanelBtn');
+  const open=panel.style.display==='none';
+  panel.style.display=open?'block':'none';
+  btn.textContent=open?'Collapse':'Expand';
+}
+async function runDiagnosis() {
+  const report=document.getElementById('diagnoseInput').value.trim();
+  if (!report) { toast('Paste a bug report first','warn'); return; }
+  if (!detailTicket) return;
+  const btn=document.getElementById('diagnoseBtn');
+  const status=document.getElementById('diagnoseStatus');
+  btn.disabled=true; btn.textContent='Diagnosing…';
+  status.textContent='Sending to Claude…';
+  const r=await api('POST','/tickets/'+detailTicket.id+'/diagnose',{report});
+  btn.disabled=false; btn.textContent='Diagnose';
+  if (!r) { status.textContent='Request failed.'; return; }
+  if (r.error) { status.textContent='Error: '+r.error; toast(r.error,'error'); return; }
+  status.textContent='Done — posted as internal note.';
+  document.getElementById('diagnoseInput').value='';
+  const t=await api('GET','/tickets/'+detailTicket.id);
+  if (t) renderDetail(t);
+  // Re-expand the panel after re-render
+  const panel=document.getElementById('diagnosePanel');
+  const btnEl=document.getElementById('diagnosePanelBtn');
+  if (panel) { panel.style.display='block'; btnEl.textContent='Collapse'; }
+  toast('Diagnosis complete','success');
+}
+async function saveAI() {
+  const apiKey=document.getElementById('aiApiKey').value;
+  const model=document.getElementById('aiModel').value;
+  const body={ai:{model}};
+  if (apiKey) body.ai.apiKey=apiKey;
+  const r=await api('PUT','/settings',body);
+  if (r) { document.getElementById('aiApiKey').value=''; toast('AI settings saved','success'); }
 }
 
 // ── Modal helpers ──────────────────────────────────────────────────────────
