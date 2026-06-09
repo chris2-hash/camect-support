@@ -1560,7 +1560,7 @@ async function deleteTpl(id) {
 // ── Report parsing ────────────────────────────────────────────────────────
 let parsedReport = {};
 function parseReportFields(text) {
-  const hubId  = (text.match(/(?:hub[\s_-]?id|hub\s*#?)[:\s=]+([a-zA-Z0-9_-]{4,32})/i)||[])[1]?.trim();
+  const hubId  = (text.match(/(?:home_id|hub[\s_-]?id)[:\s="']+([0-9a-f]{32,64})/i)||[])[1]?.trim();
   const mac    = (text.match(/([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}/)||[])[0];
   const desc   = (text.match(/(?:description|desc|issue|problem|subject)[:\s]+(.{6,120})/i)||[])[1]?.trim();
   return { hubId, mac, desc };
