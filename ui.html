@@ -404,6 +404,7 @@ tr:hover td { background:var(--surface2); }
           <button class="tab" onclick="setTab(this,'tabCanned')">Canned Responses</button>
           <button class="tab" onclick="setTab(this,'tabTemplates')">Templates</button>
           <button class="tab" onclick="setTab(this,'tabAI')">AI Diagnosis</button>
+          <button class="tab" onclick="setTab(this,'tabGmail');loadGmailStatus()">Gmail</button>
         </div>
         <div id="tabEmail" class="tabPanel active">
           <div class="detailCard">
@@ -467,6 +468,23 @@ tr:hover td { background:var(--surface2); }
           <div class="detailCard">
             <table><thead><tr><th>Name</th><th>Title</th><th>Priority</th><th>Category</th><th></th></tr></thead>
             <tbody id="tplTableBody"></tbody></table>
+          </div>
+        </div>
+        <div id="tabGmail" class="tabPanel">
+          <div class="detailCard">
+            <h4>Gmail Integration</h4>
+            <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+              Connect your Gmail account to search for past emails related to a ticket. Results appear directly in the ticket detail — no data is sent anywhere except Google's API.
+            </p>
+            <div id="gmailStatusBox" style="margin-bottom:16px;padding:12px;border-radius:var(--radius);background:var(--surface2);font-size:13px">
+              Checking connection…
+            </div>
+            <div id="gmailConnectBox">
+              <a href="/auth/google" class="btn primary" style="text-decoration:none;display:inline-block">Connect Gmail Account</a>
+            </div>
+            <div id="gmailDisconnectBox" style="display:none">
+              <button class="btn danger-ghost" onclick="disconnectGmail()">Disconnect Gmail</button>
+            </div>
           </div>
         </div>
         <div id="tabAI" class="tabPanel">
@@ -999,6 +1017,20 @@ function renderDetail(t) {
               <button class="btn primary" id="diagnoseBtn" onclick="runDiagnosis()">Diagnose</button>
               <span id="diagnoseStatus" style="font-size:12px;color:var(--muted)"></span>
             </div>
+          </div>
+        </div>
+        <div class="detailCard" id="gmailCard">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:0">
+            <h4 style="margin-bottom:0">📧 Gmail Search</h4>
+            <button class="btn ghost sm" onclick="toggleGmailPanel()" id="gmailPanelBtn">Expand</button>
+          </div>
+          <div id="gmailPanel" style="display:none;margin-top:14px">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Searches your Gmail inbox for emails related to this ticket's keywords.</p>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+              <button class="btn primary sm" id="gmailSearchBtn" onclick="runGmailSearch()">Search Gmail</button>
+              <span id="gmailSearchStatus" style="font-size:12px;color:var(--muted)"></span>
+            </div>
+            <div id="gmailResults"></div>
           </div>
         </div>
         <div class="detailCard">
@@ -1550,6 +1582,60 @@ async function runDiagnosis() {
   if (panel) { panel.style.display='block'; btnEl.textContent='Collapse'; }
   toast('Diagnosis complete','success');
 }
+// ── Gmail ──────────────────────────────────────────────────────────────────
+function toggleGmailPanel() {
+  const panel=document.getElementById('gmailPanel');
+  const btn=document.getElementById('gmailPanelBtn');
+  const open=panel.style.display==='none';
+  panel.style.display=open?'block':'none';
+  btn.textContent=open?'Collapse':'Expand';
+}
+async function runGmailSearch() {
+  if (!detailTicket) return;
+  const btn=document.getElementById('gmailSearchBtn');
+  const status=document.getElementById('gmailSearchStatus');
+  const results=document.getElementById('gmailResults');
+  btn.disabled=true; btn.textContent='Searching…'; status.textContent=''; results.innerHTML='';
+  const r=await api('POST','/tickets/'+detailTicket.id+'/gmail-search',{});
+  btn.disabled=false; btn.textContent='Search Gmail';
+  if (!r) { status.textContent='Request failed.'; return; }
+  if (r.error) { status.textContent='Error: '+r.error; toast(r.error,'error'); return; }
+  status.textContent=`Query: ${r.query}`;
+  if (!r.results.length) { results.innerHTML='<p style="font-size:13px;color:var(--muted);padding:8px 0">No matching emails found.</p>'; return; }
+  results.innerHTML=r.results.map(m=>`
+    <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:6px">
+      <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:4px">
+        <a href="https://mail.google.com/mail/u/0/#all/${m.threadId}" target="_blank"
+           style="font-size:13px;font-weight:600;color:var(--accent);text-decoration:none;flex:1">${esc(m.subject)}</a>
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">${esc(new Date(m.date).toLocaleDateString())}</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${esc(m.from)}</div>
+      <div style="font-size:12px;color:var(--text);line-height:1.5">${esc(m.snippet)}</div>
+    </div>`).join('');
+}
+async function loadGmailStatus() {
+  const r=await api('GET','/auth/google/status');
+  if (!r) return;
+  const box=document.getElementById('gmailStatusBox');
+  const conn=document.getElementById('gmailConnectBox');
+  const disc=document.getElementById('gmailDisconnectBox');
+  if (!box) return;
+  if (r.connected) {
+    box.innerHTML='<span style="color:var(--success)">✓ Gmail connected</span>';
+    box.style.background='color-mix(in srgb,var(--success) 10%,transparent)';
+    conn.style.display='none'; disc.style.display='block';
+  } else {
+    box.innerHTML='<span style="color:var(--muted)">Not connected</span>';
+    box.style.background=''; conn.style.display='block'; disc.style.display='none';
+  }
+}
+async function disconnectGmail() {
+  if (!confirm('Disconnect Gmail?')) return;
+  await api('POST','/auth/google/disconnect',{});
+  toast('Gmail disconnected','info');
+  loadGmailStatus();
+}
+
 async function saveAI() {
   const apiKey=document.getElementById('aiApiKey').value;
   const model=document.getElementById('aiModel').value;
@@ -1590,6 +1676,13 @@ async function initApp() {
 }
 
 (async () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const googleParam = urlParams.get('google');
+  if (googleParam) {
+    history.replaceState({}, '', '/');
+    if (googleParam === 'connected') setTimeout(() => toast('Gmail connected successfully!', 'success'), 500);
+    if (googleParam === 'error') setTimeout(() => toast('Gmail connection failed: ' + (urlParams.get('msg') || 'unknown error'), 'error'), 500);
+  }
   if (await checkSession()) await initApp();
 })();
 </script>

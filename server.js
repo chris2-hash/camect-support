@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS = {
   sla:    { urgent: 4, high: 8, normal: 24, low: 72 },
   notify: { onCreate: true, onAssign: true, onComment: true, onStatus: true },
   ai:     { apiKey: '', model: 'claude-haiku-4-5-20251001' },
+  google: { clientId: '', clientSecret: '', redirectUri: `http://localhost:${parseInt(process.argv[2])||3000}/auth/google/callback`, refreshToken: '', accessToken: '', tokenExpiry: 0 },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ let settings = {
   sla:    { ...DEFAULT_SETTINGS.sla,    ...(rawSettings.sla    || {}) },
   notify: { ...DEFAULT_SETTINGS.notify, ...(rawSettings.notify || {}) },
   ai:     { ...DEFAULT_SETTINGS.ai,     ...(rawSettings.ai     || {}) },
+  google: { ...DEFAULT_SETTINGS.google, ...(rawSettings.google || {}) },
 };
 
 let nextSeq    = tickets.reduce((m, t) => Math.max(m, t.seq || 0), 0) + 1;
@@ -286,6 +288,51 @@ Be concise and specific to Camect hub hardware and software.`;
     req.write(payload);
     req.end();
   });
+}
+
+// ── Google / Gmail ────────────────────────────────────────────────────────
+
+function httpsReq(hostname, path, method, headers, bodyStr) {
+  return new Promise((resolve, reject) => {
+    const opts = { hostname, path, method, headers: { ...headers } };
+    if (bodyStr) opts.headers['content-length'] = Buffer.byteLength(bodyStr);
+    const req = https.request(opts, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
+
+async function refreshGoogleToken() {
+  if (!settings.google.refreshToken) throw new Error('Gmail not connected');
+  const body = new URLSearchParams({
+    client_id:     settings.google.clientId,
+    client_secret: settings.google.clientSecret,
+    refresh_token: settings.google.refreshToken,
+    grant_type:    'refresh_token',
+  }).toString();
+  const r = await httpsReq('oauth2.googleapis.com', '/token', 'POST',
+    { 'content-type': 'application/x-www-form-urlencoded' }, body);
+  if (r.body.error) throw new Error(r.body.error_description || r.body.error);
+  settings.google.accessToken = r.body.access_token;
+  settings.google.tokenExpiry = Date.now() + (r.body.expires_in * 1000);
+  save(SETTINGS_FILE, settings);
+}
+
+async function callGmailAPI(gmailPath) {
+  if (!settings.google.refreshToken) throw new Error('Gmail not connected. Go to Settings → Gmail.');
+  if (Date.now() >= settings.google.tokenExpiry - 60000) await refreshGoogleToken();
+  const r = await httpsReq('gmail.googleapis.com', gmailPath, 'GET',
+    { 'Authorization': 'Bearer ' + settings.google.accessToken }, null);
+  if (r.status === 401) { await refreshGoogleToken(); return callGmailAPI(gmailPath); }
+  return r.body;
 }
 
 // ── Timeline helper ───────────────────────────────────────────────────────
@@ -565,6 +612,47 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── Gmail search ──────────────────────────────────────────────────────
+
+  const mGmail = pathname.match(/^\/tickets\/([^/]+)\/gmail-search$/);
+  if (mGmail && method === 'POST') {
+    const t = tickets.find(t => t.id === mGmail[1]);
+    if (!t) return json(res, 404, { error: 'Not found' });
+    if (!settings.google.refreshToken) return json(res, 400, { error: 'Gmail not connected. Go to Settings → Gmail.' });
+    const STOP = new Set('the a an is are was were be been have has had do does did will would could should may might to of in on at for with about from by and or but if not no so i you he she it we they'.split(' '));
+    const keywords = [...new Set([
+      ...t.title.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)),
+      ...(t.customerName ? t.customerName.toLowerCase().split(/\W+/).filter(w => w.length > 2) : []),
+      ...(t.hubId ? [t.hubId] : []),
+    ])].slice(0, 6);
+    if (!keywords.length) return json(res, 400, { error: 'Not enough keywords to search' });
+    const q = keywords.map(k => `"${k}"`).join(' OR ');
+    try {
+      const list = await callGmailAPI('/gmail/v1/users/me/messages?' + new URLSearchParams({ q, maxResults: 8 }));
+      if (!list.messages?.length) return json(res, 200, { results: [], query: q });
+      const results = await Promise.all(list.messages.slice(0, 6).map(async m => {
+        const msg = await callGmailAPI(`/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`);
+        const hdrs = {};
+        (msg.payload?.headers || []).forEach(h => { hdrs[h.name] = h.value; });
+        return { id: m.id, threadId: m.threadId, subject: hdrs.Subject || '(no subject)', from: hdrs.From || '', date: hdrs.Date || '', snippet: msg.snippet || '' };
+      }));
+      return json(res, 200, { results, query: q });
+    } catch (e) { return json(res, 500, { error: e.message }); }
+  }
+
+  // ── Google status / disconnect (authenticated) ─────────────────────────
+
+  if (pathname === '/auth/google/status' && method === 'GET') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    return json(res, 200, { connected: !!settings.google.refreshToken, clientConfigured: !!settings.google.clientId });
+  }
+  if (pathname === '/auth/google/disconnect' && method === 'POST') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    settings.google.refreshToken = ''; settings.google.accessToken = ''; settings.google.tokenExpiry = 0;
+    save(SETTINGS_FILE, settings);
+    return json(res, 200, { ok: true });
+  }
+
   // ── Attachments ────────────────────────────────────────────────────────
 
   const mAttach = pathname.match(/^\/tickets\/([^/]+)\/attachments$/);
@@ -719,14 +807,59 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── Gmail OAuth (unauthenticated — redirect flows) ────────────────────
+
+  if (pathname === '/auth/google' && method === 'GET') {
+    if (!settings.google.clientId) { res.writeHead(302,{'Location':'/?google=no-config'}); return res.end(); }
+    const params = new URLSearchParams({
+      client_id:     settings.google.clientId,
+      redirect_uri:  settings.google.redirectUri,
+      response_type: 'code',
+      scope:         'https://www.googleapis.com/auth/gmail.readonly',
+      access_type:   'offline',
+      prompt:        'consent',
+    });
+    res.writeHead(302, { 'Location': 'https://accounts.google.com/o/oauth2/v2/auth?' + params });
+    return res.end();
+  }
+
+  if (pathname === '/auth/google/callback' && method === 'GET') {
+    const code = parsed.searchParams.get('code');
+    if (!code) { res.writeHead(302,{'Location':'/?google=error'}); return res.end(); }
+    try {
+      const body = new URLSearchParams({
+        code, grant_type: 'authorization_code',
+        client_id:     settings.google.clientId,
+        client_secret: settings.google.clientSecret,
+        redirect_uri:  settings.google.redirectUri,
+      }).toString();
+      const r = await httpsReq('oauth2.googleapis.com', '/token', 'POST',
+        { 'content-type': 'application/x-www-form-urlencoded' }, body);
+      if (r.body.error) throw new Error(r.body.error_description || r.body.error);
+      settings.google.accessToken  = r.body.access_token;
+      settings.google.refreshToken = r.body.refresh_token || settings.google.refreshToken;
+      settings.google.tokenExpiry  = Date.now() + (r.body.expires_in * 1000);
+      save(SETTINGS_FILE, settings);
+      res.writeHead(302, { 'Location': '/?google=connected' });
+    } catch (e) {
+      console.error('[Google OAuth]', e.message);
+      res.writeHead(302, { 'Location': '/?google=error&msg=' + encodeURIComponent(e.message) });
+    }
+    return res.end();
+  }
+
   // ── Settings ──────────────────────────────────────────────────────────
 
   if (pathname === '/settings') {
     if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
     if (method === 'GET') {
       const safe = JSON.parse(JSON.stringify(settings));
-      if (safe.smtp?.password) safe.smtp.password = '••••••••';
-      if (safe.ai?.apiKey)     safe.ai.apiKey     = '••••••••';
+      if (safe.smtp?.password)         safe.smtp.password         = '••••••••';
+      if (safe.ai?.apiKey)             safe.ai.apiKey             = '••••••••';
+      if (safe.google?.clientSecret)   safe.google.clientSecret   = '••••••••';
+      if (safe.google?.refreshToken)   safe.google.refreshToken   = '••••••••';
+      if (safe.google?.accessToken)    delete safe.google.accessToken;
+      if (safe.google?.tokenExpiry)    delete safe.google.tokenExpiry;
       return json(res, 200, safe);
     }
     if (method === 'PUT') {
@@ -742,6 +875,11 @@ const server = http.createServer(async (req, res) => {
         const { apiKey, ...rest } = b.ai;
         Object.assign(settings.ai, rest);
         if (apiKey && apiKey !== '••••••••') settings.ai.apiKey = apiKey;
+      }
+      if (b.google) {
+        const { clientSecret, refreshToken, ...rest } = b.google;
+        Object.assign(settings.google, rest);
+        if (clientSecret && clientSecret !== '••••••••') settings.google.clientSecret = clientSecret;
       }
       save(SETTINGS_FILE, settings);
       return json(res, 200, { ok: true });
