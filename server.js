@@ -678,7 +678,6 @@ const server = http.createServer(async (req, res) => {
     let terms = [];
     if (b.hubId)      terms.push(b.hubId.trim());
     if (b.macAddress) terms.push(b.macAddress.trim());
-    if (b.description) terms.push(...b.description.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)).slice(0, 3));
     if (!terms.length) {
       terms = [
         ...t.title.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)),

@@ -1562,7 +1562,7 @@ let parsedReport = {};
 function parseReportFields(text) {
   const hubId  = (text.match(/(?:home_id|hub[\s_-]?id)[:\s="']+([0-9a-f]{32,64})/i)||[])[1]?.trim();
   const mac    = (text.match(/([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}/)||[])[0];
-  const desc   = (text.match(/(?:description|desc|issue|problem|subject)[:\s]+(.{6,120})/i)||[])[1]?.trim();
+  const desc   = null;
   return { hubId, mac, desc };
 }
 function onReportInput() {
