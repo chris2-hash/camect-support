@@ -13,7 +13,14 @@
   --open:    #4f8ef7;  --inprog:  #f0a832;  --pending:  #a78bfa;
   --resolved:#4caf7d;  --closed:  #555970;
   --urgent:  #e05252;  --high:    #f0a832;  --normal:   #4f8ef7;  --low: #555970;
+  --btn-hover: #333650;  --danger-hover: #2a1818;
   --radius: 7px;
+}
+html.light {
+  --bg:       #f2f4f9;  --surface:  #ffffff;  --surface2: #eaecf5;
+  --border:   #d5d9ee;  --text:     #1a1d2e;  --muted:    #6b7090;
+  --closed:   #8a8fa8;  --low:      #8a8fa8;
+  --btn-hover: #dfe3f5;  --danger-hover: #fde8e8;
 }
 body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
 input,select,textarea { background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:var(--radius); padding:7px 10px; font-size:13px; font-family:inherit; width:100%; outline:none; }
@@ -21,11 +28,11 @@ input:focus,select:focus,textarea:focus { border-color:var(--accent); }
 textarea { resize:vertical; }
 button { cursor:pointer; font-family:inherit; font-size:13px; border-radius:var(--radius); border:none; transition:background .15s; }
 .btn { background:var(--border); color:var(--text); padding:7px 14px; }
-.btn:hover { background:#333650; }
+.btn:hover { background:var(--btn-hover); }
 .btn-primary { background:var(--accent); color:#fff; padding:7px 14px; }
 .btn-primary:hover { background:#3a7de8; }
 .btn-danger { background:transparent; color:var(--danger); padding:7px 14px; border:1px solid var(--border); }
-.btn-danger:hover { border-color:var(--danger); background:#2a1818; }
+.btn-danger:hover { border-color:var(--danger); background:var(--danger-hover); }
 .btn-sm { padding:4px 10px; font-size:12px; }
 
 /* Login */
@@ -191,6 +198,7 @@ tr:hover td { background:var(--surface); }
   <header>
     <h1>Camect Support</h1>
     <span id="hdrUser"></span>
+    <button id="themeBtn" class="btn btn-sm" onclick="toggleTheme()" title="Toggle light/dark theme">🌙</button>
     <button class="btn btn-sm" onclick="doLogout()">Sign Out</button>
   </header>
   <div id="layout">
@@ -686,6 +694,19 @@ function timeAgo(ts) {
 function fmtSize(b) { return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'; }
 function fmtStatus(s) { return s==='in_progress'?'In Progress':s[0].toUpperCase()+s.slice(1); }
 function fmtCat(c) { const m={hub:'Hub',camera:'Camera',network:'Network',software:'Software',account:'Account',billing:'Billing',other:'Other'}; return m[c]||c; }
+
+// ── Theme ─────────────────────────────────────────────────────────────────
+function applyTheme(light) {
+  document.documentElement.classList.toggle('light', light);
+  const btn = document.getElementById('themeBtn');
+  if (btn) btn.textContent = light ? '🌙' : '☀️';
+}
+function toggleTheme() {
+  const light = !document.documentElement.classList.contains('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  applyTheme(light);
+}
+applyTheme(localStorage.getItem('theme') === 'light');
 
 init();
 </script>
