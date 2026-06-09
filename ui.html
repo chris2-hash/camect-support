@@ -918,7 +918,7 @@ async function openTicketDetail(id) {
   renderDetail(t);
   document.getElementById('ticketsView').style.display='none';
   document.getElementById('dashboardView').style.display='none';
-  document.getElementById('ticketDetail').style.display='';
+  document.getElementById('ticketDetail').style.display='block';
   document.getElementById('pageTitle').textContent=t.ticketId;
   document.getElementById('topbarActions').innerHTML=
     `<button class="btn ghost sm" onclick="goBackToTickets()">← Back</button>`;
