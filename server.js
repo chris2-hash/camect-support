@@ -380,6 +380,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Google OAuth redirects — no session required
+  if (pathname === '/auth/google' && method === 'GET') {
+    if (!settings.google.clientId) { res.writeHead(302,{'Location':'/?google=no-config'}); return res.end(); }
+    const params = new URLSearchParams({
+      client_id:     settings.google.clientId,
+      redirect_uri:  settings.google.redirectUri,
+      response_type: 'code',
+      scope:         'https://www.googleapis.com/auth/gmail.readonly',
+      access_type:   'offline',
+      prompt:        'consent',
+    });
+    res.writeHead(302, { 'Location': 'https://accounts.google.com/o/oauth2/v2/auth?' + params });
+    return res.end();
+  }
+
+  if (pathname === '/auth/google/callback' && method === 'GET') {
+    const code = parsed.searchParams.get('code');
+    if (!code) { res.writeHead(302,{'Location':'/?google=error'}); return res.end(); }
+    try {
+      const body = new URLSearchParams({
+        code, grant_type: 'authorization_code',
+        client_id:     settings.google.clientId,
+        client_secret: settings.google.clientSecret,
+        redirect_uri:  settings.google.redirectUri,
+      }).toString();
+      const r = await httpsReq('oauth2.googleapis.com', '/token', 'POST',
+        { 'content-type': 'application/x-www-form-urlencoded' }, body);
+      if (r.body.error) throw new Error(r.body.error_description || r.body.error);
+      settings.google.accessToken  = r.body.access_token;
+      settings.google.refreshToken = r.body.refresh_token || settings.google.refreshToken;
+      settings.google.tokenExpiry  = Date.now() + (r.body.expires_in * 1000);
+      save(SETTINGS_FILE, settings);
+      res.writeHead(302, { 'Location': '/?google=connected' });
+    } catch (e) {
+      console.error('[Google OAuth]', e.message);
+      res.writeHead(302, { 'Location': '/?google=error&msg=' + encodeURIComponent(e.message) });
+    }
+    return res.end();
+  }
+
   const sess = getSession(req);
   if (!sess) return json(res, 401, { error: 'Not authenticated' });
   if (pathname === '/auth/me') return json(res, 200, sess);
@@ -805,47 +845,6 @@ const server = http.createServer(async (req, res) => {
       users.splice(idx, 1); save(USERS_FILE, users);
       return json(res, 200, { ok: true });
     }
-  }
-
-  // ── Gmail OAuth (unauthenticated — redirect flows) ────────────────────
-
-  if (pathname === '/auth/google' && method === 'GET') {
-    if (!settings.google.clientId) { res.writeHead(302,{'Location':'/?google=no-config'}); return res.end(); }
-    const params = new URLSearchParams({
-      client_id:     settings.google.clientId,
-      redirect_uri:  settings.google.redirectUri,
-      response_type: 'code',
-      scope:         'https://www.googleapis.com/auth/gmail.readonly',
-      access_type:   'offline',
-      prompt:        'consent',
-    });
-    res.writeHead(302, { 'Location': 'https://accounts.google.com/o/oauth2/v2/auth?' + params });
-    return res.end();
-  }
-
-  if (pathname === '/auth/google/callback' && method === 'GET') {
-    const code = parsed.searchParams.get('code');
-    if (!code) { res.writeHead(302,{'Location':'/?google=error'}); return res.end(); }
-    try {
-      const body = new URLSearchParams({
-        code, grant_type: 'authorization_code',
-        client_id:     settings.google.clientId,
-        client_secret: settings.google.clientSecret,
-        redirect_uri:  settings.google.redirectUri,
-      }).toString();
-      const r = await httpsReq('oauth2.googleapis.com', '/token', 'POST',
-        { 'content-type': 'application/x-www-form-urlencoded' }, body);
-      if (r.body.error) throw new Error(r.body.error_description || r.body.error);
-      settings.google.accessToken  = r.body.access_token;
-      settings.google.refreshToken = r.body.refresh_token || settings.google.refreshToken;
-      settings.google.tokenExpiry  = Date.now() + (r.body.expires_in * 1000);
-      save(SETTINGS_FILE, settings);
-      res.writeHead(302, { 'Location': '/?google=connected' });
-    } catch (e) {
-      console.error('[Google OAuth]', e.message);
-      res.writeHead(302, { 'Location': '/?google=error&msg=' + encodeURIComponent(e.message) });
-    }
-    return res.end();
   }
 
   // ── Settings ──────────────────────────────────────────────────────────
