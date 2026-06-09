@@ -242,6 +242,19 @@ async function notifyTicket(event, ticket, extra = {}) {
 
 // ── AI Diagnosis ──────────────────────────────────────────────────────────
 
+function trimLog(text, maxChars = 40000) {
+  if (text.length <= maxChars) return text;
+  const lines = text.split('\n');
+  const ERROR_RE = /error|warn|fail|crash|exception|fatal|critical|traceback|panic|killed|abort/i;
+  const head = lines.slice(0, 120);
+  const tail = lines.slice(-200);
+  const errLines = lines.slice(120, -200).filter(l => ERROR_RE.test(l));
+  const kept = [...head, '... [middle trimmed — error/warning lines extracted below] ...', ...errLines, '... [end of log] ...', ...tail];
+  let out = kept.join('\n');
+  if (out.length > maxChars) out = out.slice(0, maxChars) + '\n... [truncated]';
+  return out;
+}
+
 async function callClaude(apiKey, model, report, ticket) {
   const system = `You are a Camect hub support engineer. Diagnose hub bug reports and logs.
 Ticket: ${ticket.title} | Priority: ${ticket.priority} | Category: ${ticket.category}${ticket.description ? '\nDescription: ' + ticket.description : ''}
@@ -640,7 +653,7 @@ const server = http.createServer(async (req, res) => {
     if (!b.report?.trim()) return json(res, 400, { error: 'Report text required' });
     if (!settings.ai?.apiKey) return json(res, 400, { error: 'Claude API key not configured. Add it in Settings → AI Diagnosis.' });
     try {
-      const reportText = b.report.trim();
+      const reportText = trimLog(b.report.trim());
       // Save report as txt attachment
       const attId = uid();
       const dateStr = new Date().toISOString().slice(0, 10);
