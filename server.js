@@ -640,13 +640,26 @@ const server = http.createServer(async (req, res) => {
     if (!b.report?.trim()) return json(res, 400, { error: 'Report text required' });
     if (!settings.ai?.apiKey) return json(res, 400, { error: 'Claude API key not configured. Add it in Settings → AI Diagnosis.' });
     try {
-      const diagnosis = await callClaude(settings.ai.apiKey, settings.ai.model, b.report.trim(), t);
+      const reportText = b.report.trim();
+      // Save report as txt attachment
+      const attId = uid();
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const stored = attId + '.txt';
+      const dir = path.join(ATTACH_DIR, t.id);
+      fs.mkdirSync(dir, { recursive: true });
+      const reportBuf = Buffer.from(reportText, 'utf8');
+      fs.writeFileSync(path.join(dir, stored), reportBuf);
+      const att = { id: attId, filename: `hub-report-${dateStr}.txt`, stored, size: reportBuf.length, ts: Date.now(), uploadedBy: sess.username };
+      t.attachments.push(att);
+      t.timeline.push(tl(sess, 'attachment', `Report saved: hub-report-${dateStr}.txt`));
+      // Run diagnosis
+      const diagnosis = await callClaude(settings.ai.apiKey, settings.ai.model, reportText, t);
       const entry = tl(sess, 'note', '🤖 AI Diagnosis:\n\n' + diagnosis, { isNote: true });
       t.timeline.push(entry);
       t.updatedTs = Date.now();
       save(TICKETS_FILE, tickets);
       ssePublish('ticket.updated', { ticket: t });
-      return json(res, 200, { diagnosis, entry });
+      return json(res, 200, { diagnosis, entry, attachment: att });
     } catch (e) {
       return json(res, 500, { error: e.message });
     }
@@ -659,12 +672,21 @@ const server = http.createServer(async (req, res) => {
     const t = tickets.find(t => t.id === mGmail[1]);
     if (!t) return json(res, 404, { error: 'Not found' });
     if (!settings.google.refreshToken) return json(res, 400, { error: 'Gmail not connected. Go to Settings → Gmail.' });
+    const b = JSON.parse((await readBody(req)).toString() || '{}');
     const STOP = new Set('the a an is are was were be been have has had do does did will would could should may might to of in on at for with about from by and or but if not no so i you he she it we they'.split(' '));
-    const keywords = [...new Set([
-      ...t.title.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)),
-      ...(t.customerName ? t.customerName.toLowerCase().split(/\W+/).filter(w => w.length > 2) : []),
-      ...(t.hubId ? [t.hubId] : []),
-    ])].slice(0, 6);
+    // Prefer explicit parsed fields from the report; fall back to ticket metadata
+    let terms = [];
+    if (b.hubId)      terms.push(b.hubId.trim());
+    if (b.macAddress) terms.push(b.macAddress.trim());
+    if (b.description) terms.push(...b.description.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)).slice(0, 3));
+    if (!terms.length) {
+      terms = [
+        ...t.title.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)),
+        ...(t.customerName ? t.customerName.toLowerCase().split(/\W+/).filter(w => w.length > 2) : []),
+        ...(t.hubId ? [t.hubId] : []),
+      ];
+    }
+    const keywords = [...new Set(terms)].slice(0, 6);
     if (!keywords.length) return json(res, 400, { error: 'Not enough keywords to search' });
     const q = keywords.map(k => `"${k}"`).join(' OR ');
     try {

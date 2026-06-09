@@ -1011,10 +1011,15 @@ function renderDetail(t) {
             <button class="btn ghost sm" onclick="toggleDiagnosePanel()" id="diagnosePanelBtn">Expand</button>
           </div>
           <div id="diagnosePanel" style="display:none;margin-top:14px">
-            <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Paste a hub bug report or log output below. Claude will diagnose the issue and post the result as an internal note.</p>
-            <textarea id="diagnoseInput" style="width:100%;min-height:140px;padding:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-size:12px;font-family:monospace;resize:vertical" placeholder="Paste hub log / bug report here…"></textarea>
-            <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
-              <button class="btn primary" id="diagnoseBtn" onclick="runDiagnosis()">Diagnose</button>
+            <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Paste a hub bug report or log below. Claude diagnoses the issue, the report is saved as a .txt attachment, and parsed fields can be used to search Gmail.</p>
+            <textarea id="diagnoseInput" style="width:100%;min-height:140px;padding:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);font-size:12px;font-family:monospace;resize:vertical" placeholder="Paste hub log / bug report here…" oninput="onReportInput()"></textarea>
+            <div id="parsedFields" style="display:none;margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);font-size:12px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px">Parsed from report</div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px" id="parsedList"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+              <button class="btn primary" id="diagnoseBtn" onclick="runDiagnosis()">Diagnose &amp; Save</button>
+              <button class="btn ghost sm" id="gmailFromReportBtn" onclick="runGmailSearchFromReport()" style="display:none">Search Gmail with report fields</button>
               <span id="diagnoseStatus" style="font-size:12px;color:var(--muted)"></span>
             </div>
           </div>
@@ -1552,6 +1557,35 @@ async function deleteTpl(id) {
   await api('DELETE','/templates/'+id); loadTplTable();
 }
 
+// ── Report parsing ────────────────────────────────────────────────────────
+let parsedReport = {};
+function parseReportFields(text) {
+  const hubId  = (text.match(/(?:hub[\s_-]?id|hub\s*#?)[:\s=]+([a-zA-Z0-9_-]{4,32})/i)||[])[1]?.trim();
+  const mac    = (text.match(/([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}/)||[])[0];
+  const desc   = (text.match(/(?:description|desc|issue|problem|subject)[:\s]+(.{6,120})/i)||[])[1]?.trim();
+  return { hubId, mac, desc };
+}
+function onReportInput() {
+  const text=document.getElementById('diagnoseInput').value;
+  parsedReport=parseReportFields(text);
+  const box=document.getElementById('parsedFields');
+  const list=document.getElementById('parsedList');
+  const gmailBtn=document.getElementById('gmailFromReportBtn');
+  const fields=[
+    parsedReport.hubId  && { label:'Hub ID',      value:parsedReport.hubId },
+    parsedReport.mac    && { label:'MAC Address',  value:parsedReport.mac },
+    parsedReport.desc   && { label:'Description',  value:parsedReport.desc.slice(0,60)+(parsedReport.desc.length>60?'…':'') },
+  ].filter(Boolean);
+  if (fields.length) {
+    list.innerHTML=fields.map(f=>`<span style="background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent);padding:2px 8px;border-radius:10px"><strong>${f.label}:</strong> ${esc(f.value)}</span>`).join('');
+    box.style.display='block';
+    if (gmailBtn) gmailBtn.style.display='inline-block';
+  } else {
+    box.style.display='none';
+    if (gmailBtn) gmailBtn.style.display='none';
+  }
+}
+
 // ── AI Diagnosis ──────────────────────────────────────────────────────────
 function toggleDiagnosePanel() {
   const panel=document.getElementById('diagnosePanel');
@@ -1569,18 +1603,55 @@ async function runDiagnosis() {
   btn.disabled=true; btn.textContent='Diagnosing…';
   status.textContent='Sending to Claude…';
   const r=await api('POST','/tickets/'+detailTicket.id+'/diagnose',{report});
-  btn.disabled=false; btn.textContent='Diagnose';
+  btn.disabled=false; btn.textContent='Diagnose & Save';
   if (!r) { status.textContent='Request failed.'; return; }
   if (r.error) { status.textContent='Error: '+r.error; toast(r.error,'error'); return; }
-  status.textContent='Done — posted as internal note.';
+  status.textContent=`Done — diagnosis posted, report saved as ${r.attachment?.filename||'attachment'}.`;
   document.getElementById('diagnoseInput').value='';
+  document.getElementById('parsedFields').style.display='none';
+  const gmailBtn=document.getElementById('gmailFromReportBtn');
+  if (gmailBtn) gmailBtn.style.display='none';
+  parsedReport={};
   const t=await api('GET','/tickets/'+detailTicket.id);
   if (t) renderDetail(t);
-  // Re-expand the panel after re-render
   const panel=document.getElementById('diagnosePanel');
   const btnEl=document.getElementById('diagnosePanelBtn');
   if (panel) { panel.style.display='block'; btnEl.textContent='Collapse'; }
-  toast('Diagnosis complete','success');
+  toast('Diagnosis complete — report saved as .txt attachment','success');
+}
+async function runGmailSearchFromReport() {
+  if (!detailTicket) return;
+  // Expand Gmail panel and search using report fields
+  const gmailPanel=document.getElementById('gmailPanel');
+  const gmailBtn=document.getElementById('gmailPanelBtn');
+  if (gmailPanel) { gmailPanel.style.display='block'; if(gmailBtn) gmailBtn.textContent='Collapse'; }
+  const btn=document.getElementById('gmailSearchBtn');
+  const status=document.getElementById('gmailSearchStatus');
+  const results=document.getElementById('gmailResults');
+  if (!btn) return;
+  btn.disabled=true; btn.textContent='Searching…'; if(status) status.textContent=''; if(results) results.innerHTML='';
+  const r=await api('POST','/tickets/'+detailTicket.id+'/gmail-search',{
+    hubId:      parsedReport.hubId      || '',
+    macAddress: parsedReport.mac        || '',
+    description:parsedReport.desc       || '',
+  });
+  btn.disabled=false; btn.textContent='Search Gmail';
+  if (!r) { if(status) status.textContent='Request failed.'; return; }
+  if (r.error) { if(status) status.textContent='Error: '+r.error; toast(r.error,'error'); return; }
+  if(status) status.textContent=`Query: ${r.query}`;
+  if (!r.results.length) { if(results) results.innerHTML='<p style="font-size:13px;color:var(--muted);padding:8px 0">No matching emails found.</p>'; return; }
+  if(results) results.innerHTML=r.results.map(m=>`
+    <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:6px">
+      <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:4px">
+        <a href="https://mail.google.com/mail/u/0/#all/${m.threadId}" target="_blank"
+           style="font-size:13px;font-weight:600;color:var(--accent);text-decoration:none;flex:1">${esc(m.subject)}</a>
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">${esc(new Date(m.date).toLocaleDateString())}</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${esc(m.from)}</div>
+      <div style="font-size:12px;color:var(--text);line-height:1.5">${esc(m.snippet)}</div>
+    </div>`).join('');
+  // scroll Gmail panel into view
+  document.getElementById('gmailCard')?.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 // ── Gmail ──────────────────────────────────────────────────────────────────
 function toggleGmailPanel() {
