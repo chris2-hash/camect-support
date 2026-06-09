@@ -157,7 +157,7 @@ const server = http.createServer(async (req, res) => {
     if (category && category !== 'all') r = r.filter(t => t.category === category);
     if (assigned === 'me')              r = r.filter(t => t.assignedTo === sess.username);
     else if (assigned === 'unassigned') r = r.filter(t => !t.assignedTo);
-    else if (assigned)                  r = r.filter(t => t.assignedTo === assigned);
+    else if (assigned && assigned !== 'all') r = r.filter(t => t.assignedTo === assigned);
     if (search) r = r.filter(t =>
       t.title.toLowerCase().includes(search) ||
       t.description.toLowerCase().includes(search) ||
