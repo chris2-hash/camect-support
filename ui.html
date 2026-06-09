@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camect Support</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #0f1117;  --surface: #1a1d27;  --surface2: #22263a;
+  --border:  #2a2d3a;  --text:    #e2e4ed;  --muted:    #8b8fa8;
+  --accent:  #4f8ef7;  --danger:  #e05252;  --success:  #4caf7d;
+  --open:    #4f8ef7;  --inprog:  #f0a832;  --pending:  #a78bfa;
+  --resolved:#4caf7d;  --closed:  #555970;
+  --urgent:  #e05252;  --high:    #f0a832;  --normal:   #4f8ef7;  --low: #555970;
+  --radius: 7px;
+}
+body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+input,select,textarea { background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:var(--radius); padding:7px 10px; font-size:13px; font-family:inherit; width:100%; outline:none; }
+input:focus,select:focus,textarea:focus { border-color:var(--accent); }
+textarea { resize:vertical; }
+button { cursor:pointer; font-family:inherit; font-size:13px; border-radius:var(--radius); border:none; transition:background .15s; }
+.btn { background:var(--border); color:var(--text); padding:7px 14px; }
+.btn:hover { background:#333650; }
+.btn-primary { background:var(--accent); color:#fff; padding:7px 14px; }
+.btn-primary:hover { background:#3a7de8; }
+.btn-danger { background:transparent; color:var(--danger); padding:7px 14px; border:1px solid var(--border); }
+.btn-danger:hover { border-color:var(--danger); background:#2a1818; }
+.btn-sm { padding:4px 10px; font-size:12px; }
+
+/* Login */
+#loginView { flex:1; display:flex; align-items:center; justify-content:center; }
+#loginBox { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:36px 40px; width:340px; }
+#loginBox h1 { font-size:20px; margin-bottom:24px; text-align:center; }
+#loginBox input { margin-bottom:12px; }
+#loginBox .btn-primary { width:100%; margin-top:4px; padding:9px; font-size:14px; }
+#loginErr { color:var(--danger); font-size:12px; margin-top:8px; text-align:center; min-height:18px; }
+
+/* App shell */
+#app { flex:1; display:none; flex-direction:column; overflow:hidden; }
+header { height:54px; background:var(--surface); border-bottom:1px solid var(--border); display:flex; align-items:center; padding:0 20px; gap:12px; flex-shrink:0; }
+header h1 { font-size:16px; font-weight:700; flex:1; }
+#hdrUser { font-size:13px; color:var(--muted); }
+#layout { flex:1; display:flex; overflow:hidden; }
+
+/* Sidebar */
+#sidebar { width:190px; flex-shrink:0; background:var(--surface); border-right:1px solid var(--border); padding:12px 8px; display:flex; flex-direction:column; gap:2px; }
+.navBtn { background:transparent; color:var(--muted); text-align:left; padding:9px 12px; border-radius:var(--radius); border:none; width:100%; font-size:13px; font-weight:500; }
+.navBtn:hover { background:var(--border); color:var(--text); }
+.navBtn.active { background:var(--surface2); color:var(--text); }
+.navBadge { background:var(--accent); color:#fff; font-size:10px; font-weight:700; padding:1px 6px; border-radius:20px; float:right; margin-top:1px; }
+
+/* Content */
+#content { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.view { flex:1; display:none; flex-direction:column; overflow:hidden; }
+.view.active { display:flex; }
+
+/* Toolbar */
+#ticketsToolbar { padding:12px 16px; border-bottom:1px solid var(--border); display:flex; gap:8px; flex-wrap:wrap; align-items:center; flex-shrink:0; }
+#ticketsToolbar input { width:180px; }
+#ticketsToolbar select { width:auto; flex:0 0 auto; }
+.toolbar-spacer { flex:1; }
+
+/* Ticket split */
+#ticketsSplit { flex:1; display:flex; overflow:hidden; }
+#ticketList { width:340px; flex-shrink:0; overflow-y:auto; border-right:1px solid var(--border); }
+#ticketDetail { flex:1; overflow-y:auto; }
+
+/* Ticket list item */
+.ticketItem { display:flex; gap:0; border-bottom:1px solid var(--border); cursor:pointer; transition:background .1s; }
+.ticketItem:hover { background:var(--surface); }
+.ticketItem.selected { background:var(--surface2); }
+.ticketPriBand { width:4px; flex-shrink:0; }
+.ticketItemBody { flex:1; padding:11px 13px; min-width:0; }
+.ticketItemTop { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+.ticketItemId { font-size:11px; color:var(--muted); font-family:monospace; }
+.ticketItemTitle { font-size:13px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ticketItemMeta { font-size:11px; color:var(--muted); display:flex; gap:8px; flex-wrap:wrap; }
+.avatar { background:var(--surface2); color:var(--muted); border-radius:50%; width:18px; height:18px; font-size:10px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
+
+/* Status / Priority badges */
+.badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; text-transform:capitalize; white-space:nowrap; }
+.badge-open        { background:color-mix(in srgb,var(--open) 18%,transparent);    color:var(--open); }
+.badge-in_progress { background:color-mix(in srgb,var(--inprog) 18%,transparent);  color:var(--inprog); }
+.badge-pending     { background:color-mix(in srgb,var(--pending) 18%,transparent); color:var(--pending); }
+.badge-resolved    { background:color-mix(in srgb,var(--resolved) 18%,transparent);color:var(--resolved); }
+.badge-closed      { background:color-mix(in srgb,var(--closed) 18%,transparent);  color:var(--closed); }
+.badge-urgent { background:color-mix(in srgb,var(--urgent) 18%,transparent); color:var(--urgent); }
+.badge-high   { background:color-mix(in srgb,var(--high)   18%,transparent); color:var(--high); }
+.badge-normal { background:color-mix(in srgb,var(--normal) 18%,transparent); color:var(--normal); }
+.badge-low    { background:color-mix(in srgb,var(--low)    18%,transparent); color:var(--low); }
+
+/* Priority band colors */
+.pri-urgent { background:var(--urgent); }
+.pri-high   { background:var(--high); }
+.pri-normal { background:var(--normal); }
+.pri-low    { background:var(--low); }
+
+/* Empty state */
+.emptyState { text-align:center; padding:60px 24px; color:var(--muted); }
+.emptyState svg { margin-bottom:12px; opacity:.3; }
+
+/* Ticket detail */
+#detailInner { padding:24px; max-width:820px; }
+#detailInner .detailHdr { display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+#detailInner .detailHdr h2 { font-size:18px; font-weight:600; flex:1; min-width:0; }
+#detailInner .detailHdr .hdrControls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.inlineSelect { background:transparent; border:none; padding:3px 6px; font-size:12px; font-weight:600; border-radius:20px; cursor:pointer; }
+.metaGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; margin-bottom:20px; }
+.metaItem label { font-size:11px; color:var(--muted); display:block; margin-bottom:3px; }
+.metaItem span { font-size:13px; }
+.descBlock { margin-bottom:20px; }
+.descBlock h3 { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px; }
+.descText { white-space:pre-wrap; font-size:14px; line-height:1.6; }
+
+/* Attachments */
+.attachList { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+.attachChip { display:flex; align-items:center; gap:6px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:5px 10px; font-size:12px; text-decoration:none; color:var(--text); }
+.attachChip:hover { border-color:var(--accent); }
+
+/* Timeline */
+.timeline { border-top:1px solid var(--border); padding-top:20px; margin-bottom:20px; }
+.tlEntry { display:flex; gap:10px; margin-bottom:14px; }
+.tlDot { width:28px; height:28px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:13px; background:var(--surface); border:1px solid var(--border); }
+.tlBody { flex:1; padding-top:4px; min-width:0; }
+.tlMeta { font-size:11px; color:var(--muted); margin-bottom:3px; }
+.tlText { font-size:13px; line-height:1.5; }
+.tlNote { background:color-mix(in srgb,var(--inprog) 10%,transparent); border:1px solid color-mix(in srgb,var(--inprog) 25%,transparent); border-radius:var(--radius); padding:8px 12px; font-size:13px; }
+.tlNote .tlNoteTag { font-size:10px; font-weight:700; color:var(--inprog); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+
+/* Comment input */
+.commentBox { border-top:1px solid var(--border); padding-top:16px; }
+.commentBox textarea { height:80px; margin-bottom:8px; }
+.commentBox .commentBtns { display:flex; gap:8px; }
+
+/* Dashboard */
+#viewDashboard { padding:24px; overflow-y:auto; }
+.statsRow { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:28px; }
+.statCard { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; min-width:130px; }
+.statCard .statNum { font-size:28px; font-weight:700; }
+.statCard .statLabel { font-size:12px; color:var(--muted); margin-top:2px; }
+.statsSection h3 { font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:12px; }
+.statusRow { display:flex; gap:8px; flex-wrap:wrap; }
+.statusCard { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; display:flex; align-items:center; gap:10px; min-width:140px; }
+.statusCard .statusNum { font-size:20px; font-weight:700; }
+
+/* Customers & Users tables */
+.tableView { padding:20px; overflow-y:auto; flex:1; }
+.tableView .tableHeader { display:flex; align-items:center; margin-bottom:16px; gap:8px; }
+.tableView .tableHeader h2 { flex:1; font-size:16px; }
+table { width:100%; border-collapse:collapse; }
+th { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; padding:8px 12px; text-align:left; border-bottom:1px solid var(--border); }
+td { padding:10px 12px; border-bottom:1px solid var(--border); font-size:13px; vertical-align:middle; }
+tr:hover td { background:var(--surface); }
+.rowActions { display:flex; gap:6px; }
+.rowActions button { background:transparent; color:var(--muted); padding:3px 8px; border:1px solid transparent; font-size:12px; }
+.rowActions button:hover { border-color:var(--border); color:var(--text); }
+.rowActions button.del:hover { border-color:var(--danger); color:var(--danger); }
+
+/* Modal */
+#modalOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; }
+#modalOverlay.open { display:flex; }
+#modalBox { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:520px; max-width:95vw; max-height:90vh; display:flex; flex-direction:column; }
+#modalBox.wide { width:680px; }
+.modalHdr { padding:18px 20px 14px; border-bottom:1px solid var(--border); display:flex; align-items:center; }
+.modalHdr h3 { font-size:15px; font-weight:600; flex:1; }
+.modalHdr button { background:transparent; color:var(--muted); font-size:18px; padding:0 4px; }
+.modalBody { padding:20px; overflow-y:auto; flex:1; }
+.modalFtr { padding:14px 20px; border-top:1px solid var(--border); display:flex; gap:8px; justify-content:flex-end; }
+.field { margin-bottom:14px; }
+.field label { font-size:12px; color:var(--muted); display:block; margin-bottom:5px; }
+.field-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.errMsg { color:var(--danger); font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="loginView">
+  <div id="loginBox">
+    <h1>Camect Support</h1>
+    <input id="lUser" placeholder="Username" onkeydown="if(event.key==='Enter')doLogin()">
+    <input id="lPass" type="password" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn-primary" onclick="doLogin()">Sign In</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <header>
+    <h1>Camect Support</h1>
+    <span id="hdrUser"></span>
+    <button class="btn btn-sm" onclick="doLogout()">Sign Out</button>
+  </header>
+  <div id="layout">
+    <nav id="sidebar">
+      <button class="navBtn active" data-v="tickets"   onclick="navigate('tickets')">🎫 Tickets<span id="openBadge" class="navBadge" style="display:none"></span></button>
+      <button class="navBtn"        data-v="dashboard" onclick="navigate('dashboard')">📊 Dashboard</button>
+      <button class="navBtn"        data-v="customers" onclick="navigate('customers')">👥 Customers</button>
+      <button class="navBtn admin-only" data-v="users" onclick="navigate('users')">⚙️ Users</button>
+    </nav>
+    <div id="content">
+
+      <!-- Tickets view -->
+      <div id="viewTickets" class="view active">
+        <div id="ticketsToolbar">
+          <input id="searchInput" placeholder="Search…" oninput="onSearch()" style="width:160px">
+          <select id="fStatus"   onchange="loadTickets()"><option value="all">All Status</option><option value="open" selected>Open</option><option value="in_progress">In Progress</option><option value="pending">Pending</option><option value="resolved">Resolved</option><option value="closed">Closed</option></select>
+          <select id="fPriority" onchange="loadTickets()"><option value="all">All Priority</option><option value="urgent">Urgent</option><option value="high">High</option><option value="normal">Normal</option><option value="low">Low</option></select>
+          <select id="fCategory" onchange="loadTickets()"><option value="all">All Categories</option><option value="hub">Hub</option><option value="camera">Camera</option><option value="network">Network</option><option value="software">Software</option><option value="account">Account</option><option value="billing">Billing</option><option value="other">Other</option></select>
+          <select id="fAssigned" onchange="loadTickets()"><option value="all">All Agents</option><option value="me">My Tickets</option><option value="unassigned">Unassigned</option></select>
+          <span class="toolbar-spacer"></span>
+          <button class="btn-primary" onclick="openTicketModal()">+ New Ticket</button>
+        </div>
+        <div id="ticketsSplit">
+          <div id="ticketList"></div>
+          <div id="ticketDetail"><div class="emptyState" style="margin-top:80px">Select a ticket to view details</div></div>
+        </div>
+      </div>
+
+      <!-- Dashboard view -->
+      <div id="viewDashboard" class="view">
+        <div style="padding:24px;overflow-y:auto">
+          <h2 style="margin-bottom:20px;font-size:18px">Dashboard</h2>
+          <div class="statsRow" id="statsCards"></div>
+          <div class="statsSection"><h3>By Status</h3><div class="statusRow" id="statsStatus"></div></div>
+        </div>
+      </div>
+
+      <!-- Customers view -->
+      <div id="viewCustomers" class="view">
+        <div class="tableView">
+          <div class="tableHeader"><h2>Customers</h2><button class="btn-primary btn-sm" onclick="openCustomerModal()">+ New Customer</button></div>
+          <table><thead><tr><th>Name</th><th>Hub ID</th><th>Email</th><th>Phone</th><th></th></tr></thead>
+          <tbody id="customersBody"></tbody></table>
+        </div>
+      </div>
+
+      <!-- Users view (admin) -->
+      <div id="viewUsers" class="view">
+        <div class="tableView">
+          <div class="tableHeader"><h2>Users</h2><button class="btn-primary btn-sm" onclick="openUserModal()">+ New User</button></div>
+          <table><thead><tr><th>Username</th><th>Display Name</th><th>Role</th><th>Created</th><th></th></tr></thead>
+          <tbody id="usersBody"></tbody></table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div id="modalOverlay" onclick="modalOverlayClick(event)">
+  <div id="modalBox">
+    <div class="modalHdr"><h3 id="modalTitle"></h3><button onclick="closeModal()">✕</button></div>
+    <div class="modalBody" id="modalBody"></div>
+    <div class="modalFtr" id="modalFtr"></div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────
+let me = null, tickets = [], customers = [], users = [], selId = null;
+let searchTimer = null;
+
+// ── API ───────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    me = await api('GET', '/auth/me');
+    showApp();
+  } catch { showLogin(); }
+}
+
+async function doLogin() {
+  const user = document.getElementById('lUser').value.trim();
+  const pass = document.getElementById('lPass').value;
+  document.getElementById('loginErr').textContent = '';
+  try {
+    const r = await api('POST', '/auth/login', { username: user, password: pass });
+    me = r.user;
+    showApp();
+  } catch (e) {
+    document.getElementById('loginErr').textContent = e.message;
+  }
+}
+
+async function doLogout() {
+  await api('POST', '/auth/logout');
+  me = null; selId = null;
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginView').style.display = 'flex';
+  document.getElementById('lPass').value = '';
+}
+
+function showLogin() {
+  document.getElementById('loginView').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+async function showApp() {
+  document.getElementById('loginView').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('hdrUser').textContent = me.displayName + (me.role === 'admin' ? '  (admin)' : '');
+  document.querySelectorAll('.admin-only').forEach(el => el.style.display = me.role === 'admin' ? '' : 'none');
+  await Promise.all([loadCustomers(), loadUsers()]);
+  loadTickets();
+  loadStats();
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────
+function navigate(view) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.v === view));
+  document.getElementById('view' + view[0].toUpperCase() + view.slice(1)).classList.add('active');
+  if (view === 'customers') renderCustomers();
+  if (view === 'users') renderUsers();
+  if (view === 'dashboard') loadStats();
+}
+
+// ── Tickets ───────────────────────────────────────────────────────────────
+async function loadTickets() {
+  const p = new URLSearchParams({
+    status:     document.getElementById('fStatus').value,
+    priority:   document.getElementById('fPriority').value,
+    category:   document.getElementById('fCategory').value,
+    assignedTo: document.getElementById('fAssigned').value,
+    search:     document.getElementById('searchInput').value.trim(),
+  });
+  tickets = await api('GET', '/tickets?' + p);
+  renderTicketList();
+  if (selId && tickets.find(t => t.id === selId)) {
+    const full = await api('GET', '/tickets/' + selId);
+    renderTicketDetail(full);
+  } else {
+    selId = null;
+    document.getElementById('ticketDetail').innerHTML = '<div class="emptyState" style="margin-top:80px">Select a ticket to view details</div>';
+  }
+  // Update open badge
+  const open = tickets.filter(t => t.status === 'open').length;
+  const badge = document.getElementById('openBadge');
+  badge.textContent = open; badge.style.display = open ? '' : 'none';
+}
+
+function onSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadTickets, 300);
+}
+
+function renderTicketList() {
+  const el = document.getElementById('ticketList');
+  if (!tickets.length) { el.innerHTML = '<div class="emptyState" style="padding:40px 20px">No tickets found</div>'; return; }
+  el.innerHTML = tickets.map(t => `
+    <div class="ticketItem${t.id === selId ? ' selected' : ''}" onclick="selectTicket('${t.id}')">
+      <div class="ticketPriBand pri-${t.priority}"></div>
+      <div class="ticketItemBody">
+        <div class="ticketItemTop">
+          <span class="ticketItemId">${esc(t.ticketId)}</span>
+          <span class="badge badge-${t.status}">${fmtStatus(t.status)}</span>
+        </div>
+        <div class="ticketItemTitle">${esc(t.title)}</div>
+        <div class="ticketItemMeta">
+          ${t.customerName ? `<span>${esc(t.customerName)}</span>` : ''}
+          ${t.assignedTo ? `<span><span class="avatar">${t.assignedTo[0].toUpperCase()}</span> ${esc(t.assignedTo)}</span>` : '<span style="color:var(--muted)">Unassigned</span>'}
+          <span>${timeAgo(t.updatedTs)}</span>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+async function selectTicket(id) {
+  selId = id;
+  document.querySelectorAll('.ticketItem').forEach(el => el.classList.toggle('selected', el.getAttribute('onclick').includes(`'${id}'`)));
+  const t = await api('GET', '/tickets/' + id);
+  renderTicketDetail(t);
+}
+
+function renderTicketDetail(t) {
+  const agentOpts = users.map(u => `<option value="${esc(u.username)}" ${u.username===t.assignedTo?'selected':''}>${esc(u.displayName)}</option>`).join('');
+  const attachHtml = t.attachments.length
+    ? t.attachments.map(a => `<a class="attachChip" href="/attachments/${t.id}/${a.stored}" download="${esc(a.filename)}">📎 ${esc(a.filename)} <span style="color:var(--muted)">${fmtSize(a.size)}</span></a>`).join('')
+    : '<span style="color:var(--muted);font-size:13px">None</span>';
+  const tlHtml = t.timeline.map(e => {
+    const icons = { created:'✦', comment:'●', note:'📝', status_change:'↻', priority_change:'⚑', assigned:'→', attachment:'📎' };
+    if (e.isNote) return `<div class="tlEntry"><div class="tlDot">${icons[e.type]||'●'}</div><div class="tlBody"><div class="tlMeta">${esc(e.user)} · ${timeAgo(e.ts)}</div><div class="tlNote"><div class="tlNoteTag">Internal Note</div>${esc(e.text)}</div></div></div>`;
+    return `<div class="tlEntry"><div class="tlDot">${icons[e.type]||'●'}</div><div class="tlBody"><div class="tlMeta">${esc(e.user)} · ${timeAgo(e.ts)}</div><div class="tlText">${esc(e.text)}</div></div></div>`;
+  }).join('');
+
+  document.getElementById('ticketDetail').innerHTML = `
+  <div id="detailInner">
+    <div class="detailHdr">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;font-family:monospace">${esc(t.ticketId)}</div>
+        <h2>${esc(t.title)}</h2>
+      </div>
+      <div class="hdrControls">
+        <select class="inlineSelect badge badge-${t.status}" onchange="quickUpdate('${t.id}','status',this.value);this.className='inlineSelect badge badge-'+this.value">
+          <option value="open" ${t.status==='open'?'selected':''}>Open</option>
+          <option value="in_progress" ${t.status==='in_progress'?'selected':''}>In Progress</option>
+          <option value="pending" ${t.status==='pending'?'selected':''}>Pending</option>
+          <option value="resolved" ${t.status==='resolved'?'selected':''}>Resolved</option>
+          <option value="closed" ${t.status==='closed'?'selected':''}>Closed</option>
+        </select>
+        <select class="inlineSelect badge badge-${t.priority}" onchange="quickUpdate('${t.id}','priority',this.value);this.className='inlineSelect badge badge-'+this.value">
+          <option value="urgent" ${t.priority==='urgent'?'selected':''}>Urgent</option>
+          <option value="high"   ${t.priority==='high'?'selected':''}>High</option>
+          <option value="normal" ${t.priority==='normal'?'selected':''}>Normal</option>
+          <option value="low"    ${t.priority==='low'?'selected':''}>Low</option>
+        </select>
+        <button class="btn btn-sm" onclick="openTicketModal('${t.id}')">Edit</button>
+        ${me.role==='admin'?`<button class="btn-danger btn-sm" onclick="deleteTicket('${t.id}')">Delete</button>`:''}
+      </div>
+    </div>
+
+    <div class="metaGrid">
+      <div class="metaItem"><label>Category</label><span>${fmtCat(t.category)}</span></div>
+      <div class="metaItem"><label>Customer</label><span>${t.customerName ? esc(t.customerName) : '<span style="color:var(--muted)">—</span>'}</span></div>
+      <div class="metaItem"><label>Hub ID</label><span style="font-family:monospace;font-size:12px">${t.hubId ? esc(t.hubId) : '<span style="color:var(--muted)">—</span>'}</span></div>
+      <div class="metaItem"><label>Assigned to</label>
+        <select style="padding:2px 6px;font-size:12px;width:auto" onchange="quickUpdate('${t.id}','assignedTo',this.value)">
+          <option value="">Unassigned</option>
+          ${agentOpts}
+        </select>
+      </div>
+      <div class="metaItem"><label>Created by</label><span>${esc(t.createdBy)}</span></div>
+      <div class="metaItem"><label>Created</label><span title="${new Date(t.ts).toLocaleString()}">${timeAgo(t.ts)}</span></div>
+      <div class="metaItem"><label>Updated</label><span title="${new Date(t.updatedTs).toLocaleString()}">${timeAgo(t.updatedTs)}</span></div>
+    </div>
+
+    <div class="descBlock">
+      <h3>Description</h3>
+      <div class="descText">${t.description ? esc(t.description) : '<span style="color:var(--muted)">No description provided.</span>'}</div>
+    </div>
+
+    <div class="descBlock">
+      <h3>Attachments</h3>
+      <div class="attachList">${attachHtml}</div>
+      <label class="btn btn-sm" style="display:inline-block;cursor:pointer">📎 Attach File<input type="file" style="display:none" onchange="uploadAttach('${t.id}',this)"></label>
+    </div>
+
+    <div class="timeline">
+      <h3 class="descBlock" style="margin-bottom:14px">Timeline</h3>
+      ${tlHtml || '<p style="color:var(--muted);font-size:13px">No activity yet.</p>'}
+    </div>
+
+    <div class="commentBox">
+      <textarea id="commentText" placeholder="Add a comment or internal note…"></textarea>
+      <div class="commentBtns">
+        <button class="btn-primary btn-sm" onclick="addComment('${t.id}',false)">Comment</button>
+        <button class="btn btn-sm" onclick="addComment('${t.id}',true)">🔒 Internal Note</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function quickUpdate(id, field, value) {
+  await api('PUT', '/tickets/' + id, { [field]: value });
+  loadTickets();
+}
+
+async function addComment(id, isNote) {
+  const text = document.getElementById('commentText')?.value.trim();
+  if (!text) return;
+  await api('POST', '/tickets/' + id + '/comments', { text, isNote });
+  document.getElementById('commentText').value = '';
+  const t = await api('GET', '/tickets/' + id);
+  renderTicketDetail(t);
+  loadTickets();
+}
+
+async function uploadAttach(id, input) {
+  const file = input.files[0]; if (!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch('/tickets/' + id + '/attachments', { method: 'POST', body: fd });
+  if (!r.ok) { alert('Upload failed'); return; }
+  const t = await api('GET', '/tickets/' + id);
+  renderTicketDetail(t);
+  input.value = '';
+}
+
+async function deleteTicket(id) {
+  if (!confirm('Delete this ticket? This cannot be undone.')) return;
+  await api('DELETE', '/tickets/' + id);
+  selId = null;
+  loadTickets();
+}
+
+// ── Ticket Modal ──────────────────────────────────────────────────────────
+async function openTicketModal(id) {
+  const t = id ? await api('GET', '/tickets/' + id) : null;
+  const custOpts = customers.map(c => `<option value="${c.id}" ${t?.customerId===c.id?'selected':''}>${esc(c.name)}</option>`).join('');
+  const agentOpts = users.map(u => `<option value="${u.username}" ${t?.assignedTo===u.username?'selected':''}>${esc(u.displayName)}</option>`).join('');
+  openModal(t ? 'Edit Ticket' : 'New Ticket', `
+    <div class="field"><label>Title</label><input id="mTitle" value="${t?esc(t.title):''}"></div>
+    <div class="field"><label>Description</label><textarea id="mDesc" rows="4">${t?esc(t.description):''}</textarea></div>
+    <div class="field-row">
+      <div class="field"><label>Priority</label>
+        <select id="mPriority"><option value="urgent" ${t?.priority==='urgent'?'selected':''}>Urgent</option><option value="high" ${t?.priority==='high'?'selected':''}>High</option><option value="normal" ${!t||t.priority==='normal'?'selected':''}>Normal</option><option value="low" ${t?.priority==='low'?'selected':''}>Low</option></select>
+      </div>
+      <div class="field"><label>Category</label>
+        <select id="mCategory"><option value="hub" ${t?.category==='hub'?'selected':''}>Hub</option><option value="camera" ${t?.category==='camera'?'selected':''}>Camera</option><option value="network" ${t?.category==='network'?'selected':''}>Network</option><option value="software" ${t?.category==='software'?'selected':''}>Software</option><option value="account" ${t?.category==='account'?'selected':''}>Account</option><option value="billing" ${t?.category==='billing'?'selected':''}>Billing</option><option value="other" ${!t||t.category==='other'?'selected':''}>Other</option></select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Customer</label>
+        <select id="mCustomer"><option value="">— None —</option>${custOpts}</select>
+      </div>
+      <div class="field"><label>Assigned to</label>
+        <select id="mAssigned"><option value="">Unassigned</option>${agentOpts}</select>
+      </div>
+    </div>
+    ${t ? `<div class="field"><label>Status</label>
+      <select id="mStatus"><option value="open" ${t.status==='open'?'selected':''}>Open</option><option value="in_progress" ${t.status==='in_progress'?'selected':''}>In Progress</option><option value="pending" ${t.status==='pending'?'selected':''}>Pending</option><option value="resolved" ${t.status==='resolved'?'selected':''}>Resolved</option><option value="closed" ${t.status==='closed'?'selected':''}>Closed</option></select>
+    </div>` : ''}
+    <div id="mErr" class="errMsg"></div>
+  `, [
+    { label: t ? 'Save Changes' : 'Create Ticket', cls: 'btn-primary', cb: () => saveTicket(id) },
+    { label: 'Cancel', cls: 'btn', cb: closeModal },
+  ], true);
+}
+
+async function saveTicket(id) {
+  const title = document.getElementById('mTitle').value.trim();
+  if (!title) { document.getElementById('mErr').textContent = 'Title is required.'; return; }
+  const body = {
+    title, description: document.getElementById('mDesc').value,
+    priority: document.getElementById('mPriority').value,
+    category: document.getElementById('mCategory').value,
+    customerId: document.getElementById('mCustomer').value,
+    assignedTo: document.getElementById('mAssigned').value,
+  };
+  if (id) body.status = document.getElementById('mStatus').value;
+  try {
+    if (id) await api('PUT', '/tickets/' + id, body);
+    else     await api('POST', '/tickets', body);
+    closeModal(); loadTickets();
+    if (id) { const t = await api('GET', '/tickets/'+id); renderTicketDetail(t); }
+  } catch (e) { document.getElementById('mErr').textContent = e.message; }
+}
+
+// ── Customers ─────────────────────────────────────────────────────────────
+async function loadCustomers() { customers = await api('GET', '/customers'); }
+function renderCustomers() {
+  document.getElementById('customersBody').innerHTML = customers.map(c => `
+    <tr>
+      <td><strong>${esc(c.name)}</strong></td>
+      <td><span style="font-family:monospace;font-size:12px">${esc(c.hubId)||'—'}</span></td>
+      <td>${esc(c.email)||'—'}</td>
+      <td>${esc(c.phone)||'—'}</td>
+      <td><div class="rowActions">
+        <button onclick="openCustomerModal('${c.id}')">Edit</button>
+        <button class="del" onclick="deleteCustomer('${c.id}')">Delete</button>
+      </div></td>
+    </tr>`).join('');
+}
+function openCustomerModal(id) {
+  const c = id ? customers.find(x => x.id === id) : null;
+  openModal(c ? 'Edit Customer' : 'New Customer', `
+    <div class="field"><label>Name *</label><input id="cName" value="${c?esc(c.name):''}"></div>
+    <div class="field"><label>Hub ID (hex)</label><input id="cHub" value="${c?esc(c.hubId):''}" placeholder="e.g. f39686d7b7fa…"></div>
+    <div class="field-row">
+      <div class="field"><label>Email</label><input id="cEmail" value="${c?esc(c.email):''}"></div>
+      <div class="field"><label>Phone</label><input id="cPhone" value="${c?esc(c.phone):''}"></div>
+    </div>
+    <div class="field"><label>Notes</label><textarea id="cNotes" rows="3">${c?esc(c.notes):''}</textarea></div>
+    <div id="cErr" class="errMsg"></div>
+  `, [
+    { label: c ? 'Save' : 'Add Customer', cls: 'btn-primary', cb: () => saveCustomer(id) },
+    { label: 'Cancel', cls: 'btn', cb: closeModal },
+  ]);
+}
+async function saveCustomer(id) {
+  const name = document.getElementById('cName').value.trim();
+  if (!name) { document.getElementById('cErr').textContent = 'Name is required.'; return; }
+  const body = { name, hubId: document.getElementById('cHub').value.trim(), email: document.getElementById('cEmail').value.trim(), phone: document.getElementById('cPhone').value.trim(), notes: document.getElementById('cNotes').value.trim() };
+  try {
+    if (id) await api('PUT', '/customers/' + id, body);
+    else    await api('POST', '/customers', body);
+    await loadCustomers(); renderCustomers(); closeModal();
+  } catch (e) { document.getElementById('cErr').textContent = e.message; }
+}
+async function deleteCustomer(id) {
+  if (!confirm('Delete this customer?')) return;
+  await api('DELETE', '/customers/' + id);
+  await loadCustomers(); renderCustomers();
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────
+async function loadUsers() { users = await api('GET', '/users'); }
+function renderUsers() {
+  document.getElementById('usersBody').innerHTML = users.map(u => `
+    <tr>
+      <td><strong>${esc(u.username)}</strong></td>
+      <td>${esc(u.displayName)}</td>
+      <td><span class="badge ${u.role==='admin'?'badge-urgent':'badge-normal'}">${u.role}</span></td>
+      <td>${new Date(u.ts).toLocaleDateString()}</td>
+      <td><div class="rowActions">
+        <button onclick="openUserModal('${u.id}')">Edit</button>
+        ${u.id !== me.id ? `<button class="del" onclick="deleteUser('${u.id}')">Delete</button>` : ''}
+      </div></td>
+    </tr>`).join('');
+}
+function openUserModal(id) {
+  const u = id ? users.find(x => x.id === id) : null;
+  openModal(u ? 'Edit User' : 'New User', `
+    ${!u ? `<div class="field"><label>Username *</label><input id="uName"></div>` : `<div class="field"><label>Username</label><input value="${esc(u.username)}" disabled style="opacity:.5"></div>`}
+    <div class="field"><label>Display Name</label><input id="uDisplay" value="${u?esc(u.displayName):''}"></div>
+    <div class="field"><label>${u?'New Password (leave blank to keep)':'Password *'}</label><input id="uPass" type="password"></div>
+    <div class="field"><label>Role</label>
+      <select id="uRole"><option value="agent" ${!u||u.role==='agent'?'selected':''}>Agent</option><option value="admin" ${u?.role==='admin'?'selected':''}>Admin</option></select>
+    </div>
+    <div id="uErr" class="errMsg"></div>
+  `, [
+    { label: u ? 'Save' : 'Create User', cls: 'btn-primary', cb: () => saveUser(id) },
+    { label: 'Cancel', cls: 'btn', cb: closeModal },
+  ]);
+}
+async function saveUser(id) {
+  const body = { displayName: document.getElementById('uDisplay').value.trim(), role: document.getElementById('uRole').value };
+  const pass = document.getElementById('uPass').value;
+  if (pass) body.password = pass;
+  if (!id) {
+    body.username = document.getElementById('uName').value.trim();
+    if (!body.username) { document.getElementById('uErr').textContent = 'Username required.'; return; }
+    if (!pass) { document.getElementById('uErr').textContent = 'Password required.'; return; }
+  }
+  try {
+    if (id) await api('PUT', '/users/' + id, body);
+    else    await api('POST', '/users', body);
+    await loadUsers(); renderUsers(); closeModal();
+  } catch (e) { document.getElementById('uErr').textContent = e.message; }
+}
+async function deleteUser(id) {
+  if (!confirm('Delete this user?')) return;
+  await api('DELETE', '/users/' + id);
+  await loadUsers(); renderUsers();
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────
+async function loadStats() {
+  const s = await api('GET', '/stats');
+  const statuses = ['open','in_progress','pending','resolved','closed'];
+  document.getElementById('statsCards').innerHTML = `
+    <div class="statCard"><div class="statNum">${(s.byStatus.open||0)+(s.byStatus.in_progress||0)+(s.byStatus.pending||0)}</div><div class="statLabel">Active Tickets</div></div>
+    <div class="statCard"><div class="statNum" style="color:var(--danger)">${s.byPriority.urgent||0}</div><div class="statLabel">Urgent</div></div>
+    <div class="statCard"><div class="statNum" style="color:var(--inprog)">${s.unassigned||0}</div><div class="statLabel">Unassigned</div></div>
+    <div class="statCard"><div class="statNum" style="color:var(--accent)">${s.myOpen||0}</div><div class="statLabel">My Open</div></div>`;
+  document.getElementById('statsStatus').innerHTML = statuses.map(st =>
+    `<div class="statusCard"><span class="badge badge-${st}">${fmtStatus(st)}</span><span class="statusNum">${s.byStatus[st]||0}</span></div>`
+  ).join('');
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────
+function openModal(title, body, buttons, wide) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = body;
+  document.getElementById('modalFtr').innerHTML = buttons.map(b =>
+    `<button class="${b.cls}" onclick="(${b.cb})()">${b.label}</button>`).join('');
+  document.getElementById('modalBox').className = wide ? 'wide' : '';
+  document.getElementById('modalOverlay').classList.add('open');
+  document.getElementById('modalBody').querySelector('input,textarea,select')?.focus();
+}
+function closeModal() { document.getElementById('modalOverlay').classList.remove('open'); }
+function modalOverlayClick(e) { if (e.target === document.getElementById('modalOverlay')) closeModal(); }
+
+// ── Utils ─────────────────────────────────────────────────────────────────
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function timeAgo(ts) {
+  const d = Math.floor((Date.now()-ts)/1000);
+  if (d<5)   return 'just now';
+  if (d<60)  return d+'s ago';
+  if (d<3600) return Math.floor(d/60)+'m ago';
+  if (d<86400) return Math.floor(d/3600)+'h ago';
+  return Math.floor(d/86400)+'d ago';
+}
+function fmtSize(b) { return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'; }
+function fmtStatus(s) { return s==='in_progress'?'In Progress':s[0].toUpperCase()+s.slice(1); }
+function fmtCat(c) { const m={hub:'Hub',camera:'Camera',network:'Network',software:'Software',account:'Account',billing:'Billing',other:'Other'}; return m[c]||c; }
+
+init();
+</script>
+</body>
+</html>
