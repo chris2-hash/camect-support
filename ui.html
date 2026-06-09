@@ -520,8 +520,26 @@ async function openTicketModal(id) {
       </div>
     </div>
     <div class="field-row">
-      <div class="field"><label>Customer</label>
+      <div class="field">
+        <label style="display:flex;align-items:center;justify-content:space-between">
+          Customer
+          <button type="button" id="newCustToggle" class="btn btn-sm" style="padding:1px 8px;font-size:11px" onclick="toggleNewCustForm()">+ New</button>
+        </label>
         <select id="mCustomer"><option value="">— None —</option>${custOpts}</select>
+        <div id="newCustForm" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">New Customer</div>
+          <div class="field" style="margin-bottom:8px"><input id="ncName" placeholder="Name *"></div>
+          <div class="field" style="margin-bottom:8px"><input id="ncHub"  placeholder="Hub ID (hex)"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <input id="ncEmail" placeholder="Email">
+            <input id="ncPhone" placeholder="Phone">
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button type="button" class="btn-primary btn-sm" onclick="createCustomerInline()">Add Customer</button>
+            <button type="button" class="btn btn-sm" onclick="toggleNewCustForm()">Cancel</button>
+            <span id="ncErr" style="color:var(--danger);font-size:12px"></span>
+          </div>
+        </div>
       </div>
       <div class="field"><label>Assigned to</label>
         <select id="mAssigned"><option value="">Unassigned</option>${agentOpts}</select>
@@ -694,6 +712,38 @@ function timeAgo(ts) {
 function fmtSize(b) { return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'; }
 function fmtStatus(s) { return s==='in_progress'?'In Progress':s[0].toUpperCase()+s.slice(1); }
 function fmtCat(c) { const m={hub:'Hub',camera:'Camera',network:'Network',software:'Software',account:'Account',billing:'Billing',other:'Other'}; return m[c]||c; }
+
+// ── Inline customer creation (inside ticket modal) ────────────────────────
+function toggleNewCustForm() {
+  const form = document.getElementById('newCustForm');
+  const btn  = document.getElementById('newCustToggle');
+  const open = form.style.display === 'none';
+  form.style.display = open ? '' : 'none';
+  btn.textContent = open ? '✕' : '+ New';
+  if (open) document.getElementById('ncName').focus();
+  document.getElementById('ncErr').textContent = '';
+}
+
+async function createCustomerInline() {
+  const name = document.getElementById('ncName').value.trim();
+  if (!name) { document.getElementById('ncErr').textContent = 'Name is required.'; return; }
+  try {
+    const c = await api('POST', '/customers', {
+      name,
+      hubId: document.getElementById('ncHub').value.trim(),
+      email: document.getElementById('ncEmail').value.trim(),
+      phone: document.getElementById('ncPhone').value.trim(),
+    });
+    customers.push(c);
+    // Add to select and pick it
+    const sel = document.getElementById('mCustomer');
+    const opt = new Option(c.name, c.id, true, true);
+    sel.appendChild(opt);
+    // Reset and close the sub-form
+    ['ncName','ncHub','ncEmail','ncPhone'].forEach(id => document.getElementById(id).value = '');
+    toggleNewCustForm();
+  } catch (e) { document.getElementById('ncErr').textContent = e.message; }
+}
 
 // ── Theme ─────────────────────────────────────────────────────────────────
 function applyTheme(light) {
