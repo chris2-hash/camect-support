@@ -1,17 +1,28 @@
 // Camect Support Ticketing
-// node server.js [port]   (default 3000)
+// node server.js [port]
 
 const http   = require('http');
 const fs     = require('fs');
 const path   = require('path');
 const crypto = require('crypto');
+const net    = require('net');
+const tls    = require('tls');
 
 const PORT           = parseInt(process.argv[2]) || 3000;
 const TICKETS_FILE   = path.join(__dirname, 'tickets.json');
 const USERS_FILE     = path.join(__dirname, 'users.json');
 const CUSTOMERS_FILE = path.join(__dirname, 'customers.json');
+const CANNED_FILE    = path.join(__dirname, 'canned.json');
+const TEMPLATES_FILE = path.join(__dirname, 'templates.json');
+const SETTINGS_FILE  = path.join(__dirname, 'settings.json');
 const ATTACH_DIR     = path.join(__dirname, 'attachments');
 const MAX_ATTACH     = 10 * 1024 * 1024;
+
+const DEFAULT_SETTINGS = {
+  smtp:   { enabled: false, host: '', port: 587, secure: false, user: '', password: '', from: '' },
+  sla:    { urgent: 4, high: 8, normal: 24, low: 72 },
+  notify: { onCreate: true, onAssign: true, onComment: true, onStatus: true },
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -64,14 +75,24 @@ function parseMultipart(body, boundary) {
 let tickets   = load(TICKETS_FILE);
 let users     = load(USERS_FILE);
 let customers = load(CUSTOMERS_FILE);
-let nextSeq   = tickets.reduce((m, t) => Math.max(m, t.seq || 0), 0) + 1;
+let canned    = load(CANNED_FILE);
+let templates = load(TEMPLATES_FILE);
+const rawSettings = load(SETTINGS_FILE, {});
+let settings = {
+  smtp:   { ...DEFAULT_SETTINGS.smtp,   ...(rawSettings.smtp   || {}) },
+  sla:    { ...DEFAULT_SETTINGS.sla,    ...(rawSettings.sla    || {}) },
+  notify: { ...DEFAULT_SETTINGS.notify, ...(rawSettings.notify || {}) },
+};
+
+let nextSeq    = tickets.reduce((m, t) => Math.max(m, t.seq || 0), 0) + 1;
 const sessions = {};
+let sseClients = [];
 
 if (!fs.existsSync(ATTACH_DIR)) fs.mkdirSync(ATTACH_DIR, { recursive: true });
 
 if (users.length === 0) {
   users.push({ id: uid(), username: 'admin', passwordHash: hashPassword('admin'),
-    role: 'admin', displayName: 'Administrator', ts: Date.now() });
+    role: 'admin', displayName: 'Administrator', email: '', ts: Date.now() });
   save(USERS_FILE, users);
   console.log('[Setup] Default admin created — login: admin / admin');
 }
@@ -88,13 +109,139 @@ function getSession(req) {
   return m ? (sessions[m[1]] || null) : null;
 }
 
+// ── SSE ───────────────────────────────────────────────────────────────────
+
+function ssePublish(type, data) {
+  const msg = `data: ${JSON.stringify({ type, ...data })}\n\n`;
+  sseClients = sseClients.filter(res => {
+    try { res.write(msg); return true; } catch { return false; }
+  });
+}
+
+// ── Email ─────────────────────────────────────────────────────────────────
+
+async function sendMail(cfg, to, subject, bodyHtml) {
+  if (!cfg?.enabled || !cfg.host || !to) return;
+  const b64 = s => Buffer.from(s).toString('base64');
+  const recipients = [].concat(to).filter(Boolean);
+  if (!recipients.length) return;
+
+  return new Promise((resolve, reject) => {
+    let buf = '', settled = false;
+    const incoming = [], pending = [];
+    const timer = setTimeout(() => settle(new Error('SMTP timeout')), 15000);
+
+    function settle(err) {
+      if (settled) return; settled = true;
+      clearTimeout(timer);
+      err ? reject(err) : resolve();
+    }
+
+    const useSSL = cfg.port === 465 || cfg.secure;
+    const sock = useSSL
+      ? tls.connect({ host: cfg.host, port: cfg.port || 465, servername: cfg.host })
+      : net.connect({ host: cfg.host, port: cfg.port || 587 });
+
+    sock.on('error', settle);
+    sock.on('data', chunk => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf('\r\n')) !== -1) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        pending.length ? pending.shift()(line) : incoming.push(line);
+      }
+    });
+
+    function readline() {
+      if (incoming.length) return Promise.resolve(incoming.shift());
+      return new Promise(res => pending.push(res));
+    }
+    async function readResp() {
+      let line; do { line = await readline(); } while (line[3] === '-');
+      return line;
+    }
+    async function expect(code) {
+      const line = await readResp();
+      if (parseInt(line) !== code) throw new Error(`SMTP ${parseInt(line)}: ${line.slice(4)}`);
+    }
+    function write(s) { sock.write(s + '\r\n'); }
+
+    async function run() {
+      await expect(220);
+      write('EHLO mail.support');
+      await expect(250);
+      if (cfg.user && cfg.password) {
+        write('AUTH LOGIN');
+        await expect(334);
+        write(b64(cfg.user));
+        await expect(334);
+        write(b64(cfg.password));
+        await expect(235);
+      }
+      write(`MAIL FROM:<${cfg.from}>`);
+      await expect(250);
+      for (const r of recipients) { write(`RCPT TO:<${r}>`); await expect(250); }
+      write('DATA');
+      await expect(354);
+      sock.write([
+        `From: Camect Support <${cfg.from}>`,
+        `To: ${recipients.join(', ')}`,
+        `Subject: ${subject}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: text/html; charset=UTF-8`,
+        `Date: ${new Date().toUTCString()}`,
+        '', bodyHtml, '.',
+      ].join('\r\n') + '\r\n');
+      await expect(250);
+      write('QUIT');
+      sock.end();
+      settle();
+    }
+    run().catch(settle);
+  });
+}
+
+async function notifyTicket(event, ticket, extra = {}) {
+  if (!settings.smtp?.enabled) return;
+  if (event === 'created'  && !settings.notify?.onCreate)  return;
+  if (event === 'assigned' && !settings.notify?.onAssign)  return;
+  if (event === 'comment'  && !settings.notify?.onComment) return;
+  if (event === 'status'   && !settings.notify?.onStatus)  return;
+  const recipientName = extra.newAssignee || ticket.assignedTo;
+  if (!recipientName) return;
+  const user = users.find(u => u.username === recipientName);
+  if (!user?.email) return;
+  const subjects = {
+    created:  `[${ticket.ticketId}] New ticket: ${ticket.title}`,
+    assigned: `[${ticket.ticketId}] Assigned to you: ${ticket.title}`,
+    comment:  `[${ticket.ticketId}] New comment: ${ticket.title}`,
+    status:   `[${ticket.ticketId}] Status changed: ${ticket.title}`,
+  };
+  const row = (k, v) => `<tr><td style="padding:4px 10px;color:#888;white-space:nowrap">${k}</td><td style="padding:4px 10px">${v}</td></tr>`;
+  const html = `<div style="font-family:sans-serif;max-width:580px;margin:0 auto;padding:24px">
+    <h2 style="color:#4f8ef7;margin-bottom:16px">${subjects[event] || ticket.title}</h2>
+    <table style="border-collapse:collapse;width:100%;background:#f5f5f5;border-radius:6px;margin-bottom:20px">
+      ${row('Status', ticket.status)} ${row('Priority', ticket.priority)}
+      ${row('Customer', ticket.customerName || '—')} ${row('Assigned to', ticket.assignedTo || '—')}
+      ${extra.comment ? row('Comment', extra.comment.replace(/\n/g, '<br>')) : ''}
+    </table>
+    <a href="http://localhost:${PORT}/" style="background:#4f8ef7;color:#fff;padding:9px 18px;border-radius:5px;text-decoration:none;font-size:13px">View Ticket</a>
+  </div>`;
+  try {
+    await sendMail(settings.smtp, user.email, subjects[event] || ticket.title, html);
+    console.log(`[Email] Notified ${user.email} (${event})`);
+  } catch (e) {
+    console.error('[Email] Failed:', e.message);
+  }
+}
+
 // ── Timeline helper ───────────────────────────────────────────────────────
 
 function tl(sess, type, text, extra = {}) {
   return { ts: Date.now(), user: sess.username, type, text, ...extra };
 }
 
-// ── Server ────────────────────────────────────────────────────────────────
+// ── Route handler ─────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
   const parsed   = new URL(req.url, 'http://localhost');
@@ -105,8 +252,6 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     return fs.createReadStream(path.join(__dirname, 'ui.html')).pipe(res);
   }
-
-  // ── Auth (no session required) ─────────────────────────────────────────
 
   if (pathname === '/auth/login' && method === 'POST') {
     const b = JSON.parse((await readBody(req)).toString() || '{}');
@@ -125,9 +270,18 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
+  if (pathname === '/stream') {
+    const sess = getSession(req);
+    if (!sess) return json(res, 401, { error: 'Not authenticated' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+    res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+    sseClients.push(res);
+    req.on('close', () => { sseClients = sseClients.filter(c => c !== res); });
+    return;
+  }
+
   const sess = getSession(req);
   if (!sess) return json(res, 401, { error: 'Not authenticated' });
-
   if (pathname === '/auth/me') return json(res, 200, sess);
 
   // ── Stats ──────────────────────────────────────────────────────────────
@@ -138,25 +292,25 @@ const server = http.createServer(async (req, res) => {
       s.byStatus[t.status]     = (s.byStatus[t.status]     || 0) + 1;
       s.byPriority[t.priority] = (s.byPriority[t.priority] || 0) + 1;
       const active = t.status !== 'closed' && t.status !== 'resolved';
-      if (active && !t.assignedTo)                    s.unassigned++;
-      if (active && t.assignedTo === sess.username)   s.myOpen++;
+      if (active && !t.assignedTo)                  s.unassigned++;
+      if (active && t.assignedTo === sess.username) s.myOpen++;
     }
     return json(res, 200, s);
   }
 
-  // ── Tickets ────────────────────────────────────────────────────────────
+  // ── Tickets list / create ──────────────────────────────────────────────
 
   if (pathname === '/tickets' && method === 'GET') {
     let r = [...tickets];
     const q = parsed.searchParams;
-    const status   = q.get('status'),   priority = q.get('priority');
+    const status = q.get('status'), priority = q.get('priority');
     const category = q.get('category'), assigned = q.get('assignedTo');
-    const search   = (q.get('search') || '').toLowerCase();
+    const search = (q.get('search') || '').toLowerCase();
     if (status   && status   !== 'all') r = r.filter(t => t.status   === status);
     if (priority && priority !== 'all') r = r.filter(t => t.priority === priority);
     if (category && category !== 'all') r = r.filter(t => t.category === category);
-    if (assigned === 'me')              r = r.filter(t => t.assignedTo === sess.username);
-    else if (assigned === 'unassigned') r = r.filter(t => !t.assignedTo);
+    if (assigned === 'me')                   r = r.filter(t => t.assignedTo === sess.username);
+    else if (assigned === 'unassigned')      r = r.filter(t => !t.assignedTo);
     else if (assigned && assigned !== 'all') r = r.filter(t => t.assignedTo === assigned);
     if (search) r = r.filter(t =>
       t.title.toLowerCase().includes(search) ||
@@ -164,8 +318,11 @@ const server = http.createServer(async (req, res) => {
       (t.customerName || '').toLowerCase().includes(search) ||
       t.ticketId.toLowerCase().includes(search));
     const ord = { open: 0, in_progress: 1, pending: 2, resolved: 3, closed: 4 };
-    r.sort((a, b) => { const d = (ord[a.status]||0)-(ord[b.status]||0); return d||b.updatedTs-a.updatedTs; });
-    return json(res, 200, r);
+    r.sort((a, b) => { const d = (ord[a.status]||0)-(ord[b.status]||0); return d || b.updatedTs - a.updatedTs; });
+    const total = r.length;
+    const limit = Math.max(1, parseInt(q.get('limit')) || 50);
+    const page  = Math.max(1, parseInt(q.get('page'))  || 1);
+    return json(res, 200, { tickets: r.slice((page-1)*limit, page*limit), total, page, pages: Math.ceil(total/limit) || 1, limit });
   }
 
   if (pathname === '/tickets' && method === 'POST') {
@@ -182,14 +339,77 @@ const server = http.createServer(async (req, res) => {
       customerName: cust?.name || b.customerName || '',
       hubId:        cust?.hubId || b.hubId || '',
       assignedTo: b.assignedTo || '', createdBy: sess.username,
+      dueDate: b.dueDate || null,
       attachments: [],
       timeline: [tl(sess, 'created', `Ticket created by ${sess.username}`)],
     };
     if (b.assignedTo) t.timeline.push(tl(sess, 'assigned', `Assigned to ${b.assignedTo}`));
     tickets.unshift(t);
     save(TICKETS_FILE, tickets);
+    ssePublish('ticket.created', { ticket: t });
+    notifyTicket('created', t).catch(() => {});
+    if (b.assignedTo) notifyTicket('assigned', t, { newAssignee: b.assignedTo }).catch(() => {});
     return json(res, 201, t);
   }
+
+  // ── Bulk actions ───────────────────────────────────────────────────────
+
+  if (pathname === '/tickets/bulk' && method === 'POST') {
+    const b = JSON.parse((await readBody(req)).toString() || '{}');
+    const { ids = [], action, value } = b;
+    if (!ids.length) return json(res, 400, { error: 'No IDs provided' });
+    let count = 0;
+    for (const id of ids) {
+      const t = tickets.find(t => t.id === id);
+      if (!t) continue;
+      if (action === 'delete') {
+        if (sess.role !== 'admin') continue;
+        tickets = tickets.filter(x => x.id !== id);
+        ssePublish('ticket.deleted', { id });
+        count++; continue;
+      }
+      if (action === 'status'   && t.status   !== value) { const p = t.status;    t.status   = value; t.timeline.push(tl(sess, 'status_change',   `Status: ${p} → ${value}`)); }
+      if (action === 'priority' && t.priority !== value) { const p = t.priority;  t.priority = value; t.timeline.push(tl(sess, 'priority_change', `Priority: ${p} → ${value}`)); }
+      if (action === 'assignee') { t.assignedTo = value; t.timeline.push(tl(sess, 'assigned', value ? `Assigned to ${value}` : 'Unassigned')); }
+      t.updatedTs = Date.now();
+      ssePublish('ticket.updated', { ticket: t });
+      count++;
+    }
+    save(TICKETS_FILE, tickets);
+    return json(res, 200, { ok: true, count });
+  }
+
+  // ── CSV export ─────────────────────────────────────────────────────────
+
+  if (pathname === '/tickets/export' && method === 'GET') {
+    let r = [...tickets];
+    const q = parsed.searchParams;
+    const status = q.get('status'), priority = q.get('priority'), category = q.get('category'), assigned = q.get('assignedTo');
+    const search = (q.get('search') || '').toLowerCase();
+    if (status   && status   !== 'all') r = r.filter(t => t.status   === status);
+    if (priority && priority !== 'all') r = r.filter(t => t.priority === priority);
+    if (category && category !== 'all') r = r.filter(t => t.category === category);
+    if (assigned === 'me')                   r = r.filter(t => t.assignedTo === sess.username);
+    else if (assigned === 'unassigned')      r = r.filter(t => !t.assignedTo);
+    else if (assigned && assigned !== 'all') r = r.filter(t => t.assignedTo === assigned);
+    if (search) r = r.filter(t => t.title.toLowerCase().includes(search) || (t.customerName||'').toLowerCase().includes(search));
+    const ord = { open: 0, in_progress: 1, pending: 2, resolved: 3, closed: 4 };
+    r.sort((a, b) => { const d = (ord[a.status]||0)-(ord[b.status]||0); return d || b.updatedTs - a.updatedTs; });
+    const q2 = s => `"${(s||'').toString().replace(/"/g,'""')}"`;
+    const header = 'Ticket ID,Title,Status,Priority,Category,Customer,Hub ID,Assigned To,Created By,Due Date,Created,Updated,Description';
+    const rows = r.map(t => [
+      t.ticketId, t.title, t.status, t.priority, t.category,
+      t.customerName||'', t.hubId||'', t.assignedTo||'', t.createdBy,
+      t.dueDate ? new Date(t.dueDate).toISOString().slice(0,10) : '',
+      new Date(t.ts).toISOString(), new Date(t.updatedTs).toISOString(),
+      t.description,
+    ].map(q2).join(','));
+    const csv = [header, ...rows].join('\r\n');
+    res.writeHead(200, { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="tickets-${Date.now()}.csv"`, 'Content-Length': Buffer.byteLength(csv) });
+    return res.end(csv);
+  }
+
+  // ── Single ticket ──────────────────────────────────────────────────────
 
   const mTicket = pathname.match(/^\/tickets\/([^/]+)$/);
   if (mTicket) {
@@ -203,11 +423,13 @@ const server = http.createServer(async (req, res) => {
       if (b.title       !== undefined) t.title       = b.title;
       if (b.description !== undefined) t.description = b.description;
       if (b.category    !== undefined) t.category    = b.category;
-      if (b.status   !== undefined && b.status   !== t.status)   { const p=t.status;   t.status=b.status;     t.timeline.push(tl(sess,'status_change',   `Status: ${p} → ${b.status}`)); }
-      if (b.priority !== undefined && b.priority !== t.priority) { const p=t.priority; t.priority=b.priority; t.timeline.push(tl(sess,'priority_change', `Priority: ${p} → ${b.priority}`)); }
+      if (b.dueDate     !== undefined) t.dueDate     = b.dueDate || null;
+      if (b.status   !== undefined && b.status   !== t.status)   { const p = t.status;    t.status   = b.status;    t.timeline.push(tl(sess, 'status_change',   `Status: ${p} → ${b.status}`));    notifyTicket('status', t).catch(()=>{}); }
+      if (b.priority !== undefined && b.priority !== t.priority) { const p = t.priority;  t.priority = b.priority;  t.timeline.push(tl(sess, 'priority_change', `Priority: ${p} → ${b.priority}`)); }
       if (b.assignedTo !== undefined && b.assignedTo !== t.assignedTo) {
         t.assignedTo = b.assignedTo;
         t.timeline.push(tl(sess, 'assigned', b.assignedTo ? `Assigned to ${b.assignedTo}` : 'Unassigned'));
+        if (b.assignedTo) notifyTicket('assigned', t, { newAssignee: b.assignedTo }).catch(()=>{});
       }
       if (b.customerId !== undefined) {
         t.customerId   = cust?.id   || b.customerId;
@@ -216,15 +438,19 @@ const server = http.createServer(async (req, res) => {
       }
       t.updatedTs = Date.now();
       save(TICKETS_FILE, tickets);
+      ssePublish('ticket.updated', { ticket: t });
       return json(res, 200, t);
     }
     if (method === 'DELETE') {
       if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
       tickets.splice(idx, 1);
       save(TICKETS_FILE, tickets);
+      ssePublish('ticket.deleted', { id: mTicket[1] });
       return json(res, 200, { ok: true });
     }
   }
+
+  // ── Comments ───────────────────────────────────────────────────────────
 
   const mComment = pathname.match(/^\/tickets\/([^/]+)\/comments$/);
   if (mComment && method === 'POST') {
@@ -236,8 +462,35 @@ const server = http.createServer(async (req, res) => {
     t.timeline.push(entry);
     t.updatedTs = Date.now();
     save(TICKETS_FILE, tickets);
+    ssePublish('ticket.updated', { ticket: t });
+    if (!b.isNote) notifyTicket('comment', t, { comment: b.text.trim() }).catch(() => {});
     return json(res, 201, entry);
   }
+
+  // ── Merge ──────────────────────────────────────────────────────────────
+
+  const mMerge = pathname.match(/^\/tickets\/([^/]+)\/merge$/);
+  if (mMerge && method === 'POST') {
+    const src = tickets.find(t => t.id === mMerge[1]);
+    if (!src) return json(res, 404, { error: 'Source ticket not found' });
+    const b   = JSON.parse((await readBody(req)).toString() || '{}');
+    const dst = tickets.find(t => t.id === b.targetId || t.ticketId === b.targetId);
+    if (!dst) return json(res, 404, { error: 'Target ticket not found' });
+    if (src.id === dst.id) return json(res, 400, { error: 'Cannot merge into itself' });
+    dst.timeline.push(tl(sess, 'merge', `Merged from ${src.ticketId}: ${src.title}`));
+    src.timeline.filter(e => e.type !== 'created').forEach(e => dst.timeline.push({ ...e }));
+    dst.attachments.push(...src.attachments);
+    dst.updatedTs = Date.now();
+    src.status = 'closed';
+    src.timeline.push(tl(sess, 'status_change', `Merged into ${dst.ticketId} and closed`));
+    src.updatedTs = Date.now();
+    save(TICKETS_FILE, tickets);
+    ssePublish('ticket.updated', { ticket: dst });
+    ssePublish('ticket.updated', { ticket: src });
+    return json(res, 200, { ok: true, target: dst });
+  }
+
+  // ── Attachments ────────────────────────────────────────────────────────
 
   const mAttach = pathname.match(/^\/tickets\/([^/]+)\/attachments$/);
   if (mAttach && method === 'POST') {
@@ -259,13 +512,14 @@ const server = http.createServer(async (req, res) => {
     t.timeline.push(tl(sess, 'attachment', `Attached: ${file.filename}`));
     t.updatedTs = Date.now();
     save(TICKETS_FILE, tickets);
+    ssePublish('ticket.updated', { ticket: t });
     return json(res, 201, att);
   }
 
   const mGetAtt = pathname.match(/^\/attachments\/([^/]+)\/([^/]+)$/);
   if (mGetAtt && method === 'GET') {
     const [, tid, stored] = mGetAtt;
-    const t   = tickets.find(t => t.id === tid);
+    const t = tickets.find(t => t.id === tid);
     const att = t?.attachments.find(a => a.stored === stored);
     if (!att) return json(res, 404, { error: 'Not found' });
     const fp = path.join(ATTACH_DIR, tid, stored);
@@ -276,6 +530,59 @@ const server = http.createServer(async (req, res) => {
     return fs.createReadStream(fp).pipe(res);
   }
 
+  // ── Canned Responses ──────────────────────────────────────────────────
+
+  if (pathname === '/canned') {
+    if (method === 'GET') return json(res, 200, canned);
+    if (method === 'POST') {
+      if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      if (!b.title?.trim()) return json(res, 400, { error: 'Title required' });
+      const c = { id: uid(), title: b.title.trim(), body: b.body || '' };
+      canned.push(c); save(CANNED_FILE, canned);
+      return json(res, 201, c);
+    }
+  }
+  const mCanned = pathname.match(/^\/canned\/([^/]+)$/);
+  if (mCanned) {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    const idx = canned.findIndex(c => c.id === mCanned[1]);
+    if (idx === -1) return json(res, 404, { error: 'Not found' });
+    if (method === 'PUT') {
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      if (b.title !== undefined) canned[idx].title = b.title;
+      if (b.body  !== undefined) canned[idx].body  = b.body;
+      save(CANNED_FILE, canned); return json(res, 200, canned[idx]);
+    }
+    if (method === 'DELETE') { canned.splice(idx, 1); save(CANNED_FILE, canned); return json(res, 200, { ok: true }); }
+  }
+
+  // ── Templates ─────────────────────────────────────────────────────────
+
+  if (pathname === '/templates') {
+    if (method === 'GET') return json(res, 200, templates);
+    if (method === 'POST') {
+      if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      if (!b.name?.trim()) return json(res, 400, { error: 'Name required' });
+      const t = { id: uid(), name: b.name.trim(), title: b.title||'', description: b.description||'', priority: b.priority||'normal', category: b.category||'other' };
+      templates.push(t); save(TEMPLATES_FILE, templates);
+      return json(res, 201, t);
+    }
+  }
+  const mTpl = pathname.match(/^\/templates\/([^/]+)$/);
+  if (mTpl) {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    const idx = templates.findIndex(t => t.id === mTpl[1]);
+    if (idx === -1) return json(res, 404, { error: 'Not found' });
+    if (method === 'PUT') {
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      Object.assign(templates[idx], { name: b.name||templates[idx].name, title: b.title??templates[idx].title, description: b.description??templates[idx].description, priority: b.priority||templates[idx].priority, category: b.category||templates[idx].category });
+      save(TEMPLATES_FILE, templates); return json(res, 200, templates[idx]);
+    }
+    if (method === 'DELETE') { templates.splice(idx, 1); save(TEMPLATES_FILE, templates); return json(res, 200, { ok: true }); }
+  }
+
   // ── Customers ──────────────────────────────────────────────────────────
 
   if (pathname === '/customers') {
@@ -284,51 +591,36 @@ const server = http.createServer(async (req, res) => {
       const b = JSON.parse((await readBody(req)).toString() || '{}');
       if (!b.name?.trim()) return json(res, 400, { error: 'Name required' });
       const c = { id: uid(), name: b.name.trim(), hubId: b.hubId||'', email: b.email||'', phone: b.phone||'', notes: b.notes||'', ts: Date.now() };
-      customers.push(c);
-      save(CUSTOMERS_FILE, customers);
+      customers.push(c); save(CUSTOMERS_FILE, customers);
       return json(res, 201, c);
     }
   }
-
   const mCust = pathname.match(/^\/customers\/([^/]+)$/);
   if (mCust) {
     const idx = customers.findIndex(c => c.id === mCust[1]);
     if (idx === -1) return json(res, 404, { error: 'Not found' });
     if (method === 'PUT') {
       const b = JSON.parse((await readBody(req)).toString() || '{}');
-      const c = customers[idx];
-      if (b.name  !== undefined) c.name  = b.name;
-      if (b.hubId !== undefined) c.hubId = b.hubId;
-      if (b.email !== undefined) c.email = b.email;
-      if (b.phone !== undefined) c.phone = b.phone;
-      if (b.notes !== undefined) c.notes = b.notes;
-      save(CUSTOMERS_FILE, customers);
-      return json(res, 200, c);
+      ['name','hubId','email','phone','notes'].forEach(k => { if (b[k] !== undefined) customers[idx][k] = b[k]; });
+      save(CUSTOMERS_FILE, customers); return json(res, 200, customers[idx]);
     }
-    if (method === 'DELETE') {
-      customers.splice(idx, 1);
-      save(CUSTOMERS_FILE, customers);
-      return json(res, 200, { ok: true });
-    }
+    if (method === 'DELETE') { customers.splice(idx, 1); save(CUSTOMERS_FILE, customers); return json(res, 200, { ok: true }); }
   }
 
   // ── Users ──────────────────────────────────────────────────────────────
 
   if (pathname === '/users') {
-    if (method === 'GET') return json(res, 200, users.map(u => ({ id: u.id, username: u.username, role: u.role, displayName: u.displayName, ts: u.ts })));
+    if (method === 'GET') return json(res, 200, users.map(u => ({ id: u.id, username: u.username, role: u.role, displayName: u.displayName, email: u.email||'', ts: u.ts })));
     if (method === 'POST') {
       if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
       const b = JSON.parse((await readBody(req)).toString() || '{}');
       if (!b.username?.trim() || !b.password) return json(res, 400, { error: 'Username and password required' });
       if (users.find(u => u.username === b.username.trim())) return json(res, 409, { error: 'Username already exists' });
-      const u = { id: uid(), username: b.username.trim(), passwordHash: hashPassword(b.password),
-        role: b.role || 'agent', displayName: (b.displayName || b.username).trim(), ts: Date.now() };
-      users.push(u);
-      save(USERS_FILE, users);
-      return json(res, 201, { id: u.id, username: u.username, role: u.role, displayName: u.displayName });
+      const u = { id: uid(), username: b.username.trim(), passwordHash: hashPassword(b.password), role: b.role||'agent', displayName: (b.displayName||b.username).trim(), email: b.email||'', ts: Date.now() };
+      users.push(u); save(USERS_FILE, users);
+      return json(res, 201, { id: u.id, username: u.username, role: u.role, displayName: u.displayName, email: u.email });
     }
   }
-
   const mUser = pathname.match(/^\/users\/([^/]+)$/);
   if (mUser) {
     const idx = users.findIndex(u => u.id === mUser[1]);
@@ -337,18 +629,54 @@ const server = http.createServer(async (req, res) => {
       if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
       const b = JSON.parse((await readBody(req)).toString() || '{}');
       const u = users[idx];
-      if (b.displayName) u.displayName  = b.displayName;
-      if (b.role)        u.role         = b.role;
-      if (b.password)    u.passwordHash = hashPassword(b.password);
+      if (b.displayName !== undefined) u.displayName  = b.displayName;
+      if (b.role        !== undefined) u.role         = b.role;
+      if (b.email       !== undefined) u.email        = b.email;
+      if (b.password)                  u.passwordHash = hashPassword(b.password);
       save(USERS_FILE, users);
-      return json(res, 200, { id: u.id, username: u.username, role: u.role, displayName: u.displayName });
+      return json(res, 200, { id: u.id, username: u.username, role: u.role, displayName: u.displayName, email: u.email });
     }
     if (method === 'DELETE') {
       if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
       if (users[idx].id === sess.id) return json(res, 400, { error: 'Cannot delete yourself' });
-      users.splice(idx, 1);
-      save(USERS_FILE, users);
+      users.splice(idx, 1); save(USERS_FILE, users);
       return json(res, 200, { ok: true });
+    }
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────
+
+  if (pathname === '/settings') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    if (method === 'GET') {
+      const safe = JSON.parse(JSON.stringify(settings));
+      if (safe.smtp?.password) safe.smtp.password = '••••••••';
+      return json(res, 200, safe);
+    }
+    if (method === 'PUT') {
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      if (b.smtp) {
+        const { password, ...rest } = b.smtp;
+        Object.assign(settings.smtp, rest);
+        if (password && password !== '••••••••') settings.smtp.password = password;
+      }
+      if (b.sla)    Object.assign(settings.sla,    b.sla);
+      if (b.notify) Object.assign(settings.notify, b.notify);
+      save(SETTINGS_FILE, settings);
+      return json(res, 200, { ok: true });
+    }
+  }
+
+  if (pathname === '/settings/test-email' && method === 'POST') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    const me = users.find(u => u.id === sess.id);
+    if (!me?.email) return json(res, 400, { error: 'Set your email address in Users first.' });
+    try {
+      await sendMail(settings.smtp, me.email, 'Camect Support — Test Email',
+        '<div style="font-family:sans-serif;padding:20px"><p>Email notifications are working correctly.</p></div>');
+      return json(res, 200, { ok: true });
+    } catch (e) {
+      return json(res, 500, { error: e.message });
     }
   }
 
