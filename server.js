@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
   notify: { onCreate: true, onAssign: true, onComment: true, onStatus: true },
   ai:     { apiKey: '', model: 'claude-haiku-4-5-20251001' },
   google: { clientId: '', clientSecret: '', redirectUri: `http://localhost:${parseInt(process.argv[2])||3000}/auth/google/callback`, refreshToken: '', accessToken: '', tokenExpiry: 0 },
+  strety: { clientId: '', clientSecret: '', accessToken: '', tokenExpiry: 0, metricIds: {}, autoPush: false, pushDay: 1, pushHour: 8, lastPush: 0 },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -357,6 +358,117 @@ async function callGmailAPI(gmailPath) {
 function tl(sess, type, text, extra = {}) {
   return { ts: Date.now(), user: sess.username, type, text, ...extra };
 }
+
+// ── Strety ────────────────────────────────────────────────────────────────
+
+const STRETY_METRICS_DEF = [
+  { key: 'tickets_created',      name: 'Tickets Created (Imported)' },
+  { key: 'tickets_resolved',     name: 'Tickets Resolved (Imported)' },
+  { key: 'open_tickets',         name: 'Open Tickets (Imported)' },
+  { key: 'sla_breaches',         name: 'SLA Breaches (Imported)' },
+  { key: 'avg_resolution_hours', name: 'Avg Resolution Time hrs (Imported)' },
+];
+
+async function getStretyToken() {
+  const s = settings.strety;
+  if (!s.clientId || !s.clientSecret) throw new Error('Strety credentials not configured');
+  if (s.accessToken && s.tokenExpiry > Date.now() + 60000) return s.accessToken;
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id:     s.clientId,
+    client_secret: s.clientSecret,
+    scope: 'write',
+  }).toString();
+  const r = await httpsReq('2.strety.com', '/oauth/token', 'POST',
+    { 'content-type': 'application/x-www-form-urlencoded' }, body);
+  if (r.body?.error) throw new Error(r.body.error_description || r.body.error);
+  if (!r.body?.access_token) throw new Error(`Strety auth failed (HTTP ${r.status})`);
+  settings.strety.accessToken = r.body.access_token;
+  settings.strety.tokenExpiry = Date.now() + (r.body.expires_in || 3600) * 1000;
+  save(SETTINGS_FILE, settings);
+  return settings.strety.accessToken;
+}
+
+async function stretyReq(method, path, body) {
+  const token = await getStretyToken();
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const headers = { 'authorization': `Bearer ${token}`, 'accept': 'application/json' };
+  if (bodyStr) headers['content-type'] = 'application/json';
+  const r = await httpsReq('2.strety.com', path, method, headers, bodyStr || undefined);
+  if (r.status >= 400) throw new Error(`Strety API error ${r.status}: ${JSON.stringify(r.body)}`);
+  return r.body;
+}
+
+function getTicketStats() {
+  const now = Date.now();
+  const weekAgo = now - 7 * 24 * 3600000;
+  const createdThisWeek  = tickets.filter(t => t.ts >= weekAgo).length;
+  const resolvedThisWeek = tickets.filter(t =>
+    (t.status === 'resolved' || t.status === 'closed') && t.updatedTs >= weekAgo).length;
+  const openTickets = tickets.filter(t =>
+    t.status !== 'closed' && t.status !== 'resolved').length;
+  const slaBreaches = tickets.filter(t => {
+    if (t.status === 'closed' || t.status === 'resolved') return false;
+    if (t.ts < weekAgo) return false;
+    const hours = settings.sla[t.priority] || 24;
+    return (now - t.ts) / 3600000 > hours;
+  }).length;
+  const resolved = tickets.filter(t =>
+    (t.status === 'resolved' || t.status === 'closed') && t.updatedTs >= weekAgo);
+  const avgResHours = resolved.length > 0
+    ? Math.round(resolved.reduce((s, t) => s + (t.updatedTs - t.ts) / 3600000, 0) / resolved.length)
+    : 0;
+  return { createdThisWeek, resolvedThisWeek, openTickets, slaBreaches, avgResHours };
+}
+
+async function ensureStretyMetrics() {
+  const metricIds = { ...(settings.strety.metricIds || {}) };
+  let changed = false;
+  for (const m of STRETY_METRICS_DEF) {
+    if (!metricIds[m.key]) {
+      const created = await stretyReq('POST', '/api/v1/metrics', { name: m.name });
+      const id = created?.data?.id || created?.id;
+      if (!id) throw new Error(`No ID returned when creating metric "${m.name}"`);
+      metricIds[m.key] = id;
+      changed = true;
+    }
+  }
+  if (changed) { settings.strety.metricIds = metricIds; save(SETTINGS_FILE, settings); }
+  return metricIds;
+}
+
+async function pushToStrety() {
+  const metricIds = await ensureStretyMetrics();
+  const s = getTicketStats();
+  const values = {
+    tickets_created:      s.createdThisWeek,
+    tickets_resolved:     s.resolvedThisWeek,
+    open_tickets:         s.openTickets,
+    sla_breaches:         s.slaBreaches,
+    avg_resolution_hours: s.avgResHours,
+  };
+  const results = [];
+  for (const [key, value] of Object.entries(values)) {
+    const id = metricIds[key];
+    if (!id) continue;
+    await stretyReq('POST', `/api/v1/metrics/${id}/check_ins`, { value });
+    results.push({ key, value });
+  }
+  settings.strety.lastPush = Date.now();
+  save(SETTINGS_FILE, settings);
+  return results;
+}
+
+// Weekly auto-push — checks every hour
+setInterval(async () => {
+  if (!settings.strety?.autoPush || !settings.strety?.clientId || !settings.strety?.clientSecret) return;
+  const now = new Date();
+  if (now.getDay() !== (settings.strety.pushDay ?? 1)) return;
+  if (now.getHours() !== (settings.strety.pushHour ?? 8)) return;
+  if (Date.now() - (settings.strety.lastPush || 0) < 23 * 3600000) return;
+  try { await pushToStrety(); console.log('[Strety] Auto-push completed'); }
+  catch (e) { console.error('[Strety] Auto-push failed:', e.message); }
+}, 3600000);
 
 // ── Route handler ─────────────────────────────────────────────────────────
 
@@ -971,6 +1083,9 @@ const server = http.createServer(async (req, res) => {
       if (safe.google?.refreshToken)   safe.google.refreshToken   = '••••••••';
       if (safe.google?.accessToken)    delete safe.google.accessToken;
       if (safe.google?.tokenExpiry)    delete safe.google.tokenExpiry;
+      if (safe.strety?.clientSecret)   safe.strety.clientSecret = '••••••••';
+      if (safe.strety?.accessToken)    delete safe.strety.accessToken;
+      if (safe.strety?.tokenExpiry)    delete safe.strety.tokenExpiry;
       return json(res, 200, safe);
     }
     if (method === 'PUT') {
@@ -992,9 +1107,48 @@ const server = http.createServer(async (req, res) => {
         Object.assign(settings.google, rest);
         if (clientSecret && clientSecret !== '••••••••') settings.google.clientSecret = clientSecret;
       }
+      if (b.strety) {
+        const { clientSecret, ...rest } = b.strety;
+        const credChanged = clientSecret && clientSecret !== '••••••••' &&
+          clientSecret !== settings.strety.clientSecret;
+        Object.assign(settings.strety, rest);
+        if (clientSecret && clientSecret !== '••••••••') settings.strety.clientSecret = clientSecret;
+        if (credChanged) { settings.strety.accessToken = ''; settings.strety.tokenExpiry = 0; }
+      }
       save(SETTINGS_FILE, settings);
       return json(res, 200, { ok: true });
     }
+  }
+
+  // ── Strety routes ────────────────────────────────────────────────────────
+
+  if (pathname === '/strety/status' && method === 'GET') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    const s = settings.strety;
+    return json(res, 200, {
+      connected:  !!(s.clientId && s.clientSecret),
+      hasMetrics: Object.keys(s.metricIds || {}).length === STRETY_METRICS_DEF.length,
+      metricIds:  s.metricIds || {},
+      lastPush:   s.lastPush || 0,
+      autoPush:   s.autoPush || false,
+      pushDay:    s.pushDay  ?? 1,
+      pushHour:   s.pushHour ?? 8,
+    });
+  }
+
+  if (pathname === '/strety/push' && method === 'POST') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    try {
+      const results = await pushToStrety();
+      return json(res, 200, { ok: true, results, lastPush: settings.strety.lastPush });
+    } catch (e) { return json(res, 500, { error: e.message }); }
+  }
+
+  if (pathname === '/strety/metrics' && method === 'DELETE') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    settings.strety.metricIds = {};
+    save(SETTINGS_FILE, settings);
+    return json(res, 200, { ok: true });
   }
 
   if (pathname === '/settings/test-email' && method === 'POST') {
