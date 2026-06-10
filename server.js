@@ -381,12 +381,11 @@ async function getStretyToken(user) {
     grant_type:    'client_credentials',
     client_id:     s.clientId,
     client_secret: s.clientSecret,
-    scope:         'write',
   }).toString();
   const r = await httpsReq('2.strety.com', '/oauth/token', 'POST',
     { 'content-type': 'application/x-www-form-urlencoded' }, body);
   if (r.body?.error) throw new Error(r.body.error_description || r.body.error);
-  if (!r.body?.access_token) throw new Error(`Strety auth failed (HTTP ${r.status})`);
+  if (!r.body?.access_token) throw new Error(`Strety auth failed (HTTP ${r.status}): ${typeof r.body === 'string' ? r.body : JSON.stringify(r.body)}`);
   s.accessToken = r.body.access_token;
   s.tokenExpiry = Date.now() + (r.body.expires_in || 3600) * 1000;
   save(USERS_FILE, users);
