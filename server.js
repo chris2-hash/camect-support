@@ -565,12 +565,16 @@ const server = http.createServer(async (req, res) => {
   // ── Stats ──────────────────────────────────────────────────────────────
 
   if (pathname === '/stats' && method === 'GET') {
-    const s = { byStatus: {}, byPriority: {}, unassigned: 0, myOpen: 0 };
-    for (const t of tickets) {
+    const agentFilter = parsed.searchParams.get('agent'); // username, 'all', or null
+    const src = (agentFilter && agentFilter !== 'all')
+      ? tickets.filter(t => t.assignedTo === agentFilter)
+      : tickets;
+    const s = { byStatus: {}, byPriority: {}, unassigned: 0, myOpen: 0, filtered: !!agentFilter && agentFilter !== 'all' };
+    for (const t of src) {
       s.byStatus[t.status]     = (s.byStatus[t.status]     || 0) + 1;
       s.byPriority[t.priority] = (s.byPriority[t.priority] || 0) + 1;
       const active = t.status !== 'closed' && t.status !== 'resolved';
-      if (active && !t.assignedTo)                  s.unassigned++;
+      if (active && !t.assignedTo && !s.filtered) s.unassigned++;
       if (active && t.assignedTo === sess.username) s.myOpen++;
     }
     return json(res, 200, s);

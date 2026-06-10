@@ -306,6 +306,13 @@ tr:hover td { background:var(--surface2); }
     <div id="content">
       <!-- Dashboard -->
       <div id="dashboardView">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--muted)">Viewing:</span>
+          <select id="dashAgentFilter" onchange="dashFilterChanged()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:var(--radius);padding:5px 10px;font-size:13px">
+            <option value="__me__">My Tickets</option>
+            <option value="all">All Agents</option>
+          </select>
+        </div>
         <div class="statsGrid" id="statsGrid"></div>
         <div id="recentTickets"></div>
       </div>
@@ -813,6 +820,7 @@ let custFocusIdx = -1, custOptions = [];
 let sseSource = null;
 let slaConfig = { urgent:4, high:8, normal:24, low:72, workStart:9, workEnd:17 };
 let holidays = [], leaves = [];
+let dashboardAgent = null; // set to me.username after login
 
 // ── Theme ──────────────────────────────────────────────────────────────────
 function applyTheme(light) {
@@ -995,22 +1003,40 @@ function refreshTicketRow(ticket) {
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────
+function dashFilterChanged() {
+  const val = document.getElementById('dashAgentFilter').value;
+  dashboardAgent = val === '__me__' ? me.username : val;
+  loadDashboard();
+}
 async function loadDashboard() {
-  const stats = await api('GET','/stats');
+  const agent = dashboardAgent || me.username;
+  const isAll = agent === 'all';
+  const qs = isAll ? '' : `?agent=${encodeURIComponent(agent)}`;
+  const stats = await api('GET', '/stats' + qs);
   if (!stats) return;
-  const bs=stats.byStatus||{}, bp=stats.byPriority||{};
-  document.getElementById('statsGrid').innerHTML = [
+  const bs = stats.byStatus || {};
+  const cards = isAll ? [
     {l:'Open',        v:bs.open||0,         c:'accent'},
     {l:'In Progress', v:bs.in_progress||0,  c:'warning'},
     {l:'Unassigned',  v:stats.unassigned||0,c:'danger'},
     {l:'My Open',     v:stats.myOpen||0,    c:'success'},
     {l:'Pending',     v:bs.pending||0,      c:''},
     {l:'Resolved',    v:bs.resolved||0,     c:''},
-  ].map(s=>`<div class="statCard ${s.c}"><div class="label">${s.l}</div><div class="value">${s.v}</div></div>`).join('');
+  ] : [
+    {l:'Open',        v:bs.open||0,         c:'accent'},
+    {l:'In Progress', v:bs.in_progress||0,  c:'warning'},
+    {l:'Pending',     v:bs.pending||0,      c:''},
+    {l:'Resolved',    v:bs.resolved||0,     c:'success'},
+    {l:'Closed',      v:bs.closed||0,       c:''},
+  ];
+  document.getElementById('statsGrid').innerHTML = cards
+    .map(s=>`<div class="statCard ${s.c}"><div class="label">${esc(s.l)}</div><div class="value">${s.v}</div></div>`).join('');
   const r = document.getElementById('recentTickets');
-  const data = await api('GET','/tickets?limit=10&page=1');
+  const ticketQs = isAll ? 'limit=10&page=1' : `limit=10&page=1&assignedTo=${encodeURIComponent(agent)}`;
+  const data = await api('GET', '/tickets?' + ticketQs);
   if (!data?.tickets?.length) { r.innerHTML='<p class="empty">No tickets yet.</p>'; return; }
-  r.innerHTML = `<h3 style="margin-bottom:12px;font-size:14px;color:var(--muted)">Recent Tickets</h3>
+  const label = isAll ? 'Recent Tickets' : agent === me.username ? 'My Recent Tickets' : `Recent Tickets — ${esc(agent)}`;
+  r.innerHTML = `<h3 style="margin-bottom:12px;font-size:14px;color:var(--muted)">${label}</h3>
     <div class="ticketList">${data.tickets.map(t=>ticketRowHtml(t,false)).join('')}</div>`;
   r.querySelectorAll('.ticketRow').forEach(row => {
     row.addEventListener('click', () => openTicketDetail(row.dataset.id));
@@ -2146,6 +2172,21 @@ async function initApp() {
   if (me.role==='admin') {
     const s=await api('GET','/settings');
     if (s?.sla) slaConfig=s.sla;
+  }
+  // Populate dashboard agent filter dropdown
+  dashboardAgent = me.username;
+  const sel = document.getElementById('dashAgentFilter');
+  if (sel && users.length) {
+    sel.innerHTML = `<option value="__me__">My Tickets</option><option value="all">All Agents</option>`;
+    users.filter(u => u.role !== 'viewer').forEach(u => {
+      if (u.username !== me.username) {
+        const opt = document.createElement('option');
+        opt.value = u.username;
+        opt.textContent = u.displayName || u.username;
+        sel.appendChild(opt);
+      }
+    });
+    sel.value = '__me__';
   }
   showApp();
   connectSSE();
