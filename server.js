@@ -608,6 +608,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── Feedback email ────────────────────────────────────────────────────────
+
+  const mFeedback = pathname.match(/^\/tickets\/([^/]+)\/feedback-email$/);
+  if (mFeedback && method === 'POST') {
+    const t = tickets.find(t => t.id === mFeedback[1]);
+    if (!t) return json(res, 404, { error: 'Not found' });
+    const b = JSON.parse((await readBody(req)).toString() || '{}');
+    if (!b.to?.trim() || !b.subject?.trim() || !b.body?.trim()) return json(res, 400, { error: 'to, subject, body required' });
+    try {
+      await sendMail(settings.smtp, b.to.trim(), b.subject.trim(), b.body);
+      t.timeline.push(tl(sess, 'note', `Feedback email sent to ${b.to.trim()}`));
+      t.updatedTs = Date.now();
+      save(TICKETS_FILE, tickets);
+      ssePublish('ticket.updated', { ticket: t });
+      return json(res, 200, { ok: true });
+    } catch (e) {
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   // ── Comments ───────────────────────────────────────────────────────────
 
   const mComment = pathname.match(/^\/tickets\/([^/]+)\/comments$/);
