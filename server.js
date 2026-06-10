@@ -373,6 +373,18 @@ function getUserStrety(user) {
   return user.strety;
 }
 
+function stretyHeaders(user, extra) {
+  const s = getUserStrety(user);
+  const h = {
+    'user-agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'accept':          'application/json, text/plain, */*',
+    'accept-language': 'en-US,en;q=0.9',
+    ...extra,
+  };
+  if (s.cfClearance) h['cookie'] = `cf_clearance=${s.cfClearance}`;
+  return h;
+}
+
 async function getStretyToken(user) {
   const s = getUserStrety(user);
   if (!s.clientId || !s.clientSecret) throw new Error('Strety credentials not configured');
@@ -383,9 +395,13 @@ async function getStretyToken(user) {
     client_secret: s.clientSecret,
   }).toString();
   const r = await httpsReq('2.strety.com', '/oauth/token', 'POST',
-    { 'content-type': 'application/x-www-form-urlencoded' }, body);
+    stretyHeaders(user, { 'content-type': 'application/x-www-form-urlencoded' }), body);
   if (r.body?.error) throw new Error(r.body.error_description || r.body.error);
-  if (!r.body?.access_token) throw new Error(`Strety auth failed (HTTP ${r.status}): ${typeof r.body === 'string' ? r.body : JSON.stringify(r.body)}`);
+  if (!r.body?.access_token) {
+    const detail = typeof r.body === 'string' ? r.body.slice(0, 200) : JSON.stringify(r.body);
+    if (r.status === 403) throw new Error('Cloudflare is blocking the request. Paste your cf_clearance cookie in My Strety settings (see instructions).');
+    throw new Error(`Strety auth failed (HTTP ${r.status}): ${detail}`);
+  }
   s.accessToken = r.body.access_token;
   s.tokenExpiry = Date.now() + (r.body.expires_in || 3600) * 1000;
   save(USERS_FILE, users);
@@ -395,7 +411,7 @@ async function getStretyToken(user) {
 async function stretyReq(user, method, path, body, token) {
   if (!token) token = await getStretyToken(user);
   const bodyStr = body ? JSON.stringify(body) : '';
-  const headers = { 'authorization': `Bearer ${token}`, 'accept': 'application/json' };
+  const headers = stretyHeaders(user, { 'authorization': `Bearer ${token}`, 'accept': 'application/json' });
   if (bodyStr) headers['content-type'] = 'application/json';
   const r = await httpsReq('2.strety.com', path, method, headers, bodyStr || undefined);
   if (r.status >= 400) throw new Error(`Strety API error ${r.status}: ${JSON.stringify(r.body)}`);
@@ -425,13 +441,13 @@ function getTicketStats(username) {
   return { createdThisWeek, resolvedThisWeek, openTickets, slaBreaches, avgResHours };
 }
 
-async function ensureStretyMetrics(user, token) {
+async function ensureStretyMetrics(user) {
   const s = getUserStrety(user);
   const metricIds = { ...(s.metricIds || {}) };
   let changed = false;
   for (const m of STRETY_METRICS_DEF) {
     if (!metricIds[m.key]) {
-      const created = await stretyReq(user, 'POST', '/api/v1/metrics', { name: m.name }, token);
+      const created = await stretyReq(user, 'POST', '/api/v1/metrics', { name: m.name });
       const id = created?.data?.id || created?.id;
       if (!id) throw new Error(`No ID returned when creating metric "${m.name}"`);
       metricIds[m.key] = id;
@@ -442,8 +458,8 @@ async function ensureStretyMetrics(user, token) {
   return metricIds;
 }
 
-async function pushToStrety(user, token) {
-  const metricIds = await ensureStretyMetrics(user, token);
+async function pushToStrety(user) {
+  const metricIds = await ensureStretyMetrics(user);
   const st = getTicketStats(user.username);
   const values = {
     tickets_created:      st.createdThisWeek,
@@ -456,7 +472,7 @@ async function pushToStrety(user, token) {
   for (const [key, value] of Object.entries(values)) {
     const id = metricIds[key];
     if (!id) continue;
-    await stretyReq(user, 'POST', `/api/v1/metrics/${id}/check_ins`, { value }, token);
+    await stretyReq(user, 'POST', `/api/v1/metrics/${id}/check_ins`, { value });
     results.push({ key, value });
   }
   getUserStrety(user).lastPush = Date.now();
@@ -1128,13 +1144,14 @@ const server = http.createServer(async (req, res) => {
     if (!user) return json(res, 404, { error: 'User not found' });
     const s = user.strety || {};
     return json(res, 200, {
-      clientId:   s.clientId   || '',
-      connected:  !!(s.clientId && s.clientSecret),
-      hasMetrics: Object.keys(s.metricIds || {}).length === STRETY_METRICS_DEF.length,
-      lastPush:   s.lastPush   || 0,
-      autoPush:   s.autoPush   || false,
-      pushDay:    s.pushDay    ?? 1,
-      pushHour:   s.pushHour   ?? 8,
+      clientId:     s.clientId   || '',
+      connected:    !!(s.clientId && s.clientSecret),
+      hasCfCookie:  !!(s.cfClearance),
+      hasMetrics:   Object.keys(s.metricIds || {}).length === STRETY_METRICS_DEF.length,
+      lastPush:     s.lastPush   || 0,
+      autoPush:     s.autoPush   || false,
+      pushDay:      s.pushDay    ?? 1,
+      pushHour:     s.pushHour   ?? 8,
     });
   }
 
@@ -1150,6 +1167,7 @@ const server = http.createServer(async (req, res) => {
       s.accessToken  = '';
       s.tokenExpiry  = 0;
     }
+    if (b.cfClearance !== undefined) { s.cfClearance = b.cfClearance; s.accessToken = ''; s.tokenExpiry = 0; }
     if (b.autoPush  !== undefined) s.autoPush  = b.autoPush;
     if (b.pushDay   !== undefined) s.pushDay   = b.pushDay;
     if (b.pushHour  !== undefined) s.pushHour  = b.pushHour;
@@ -1157,19 +1175,11 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
-  if (pathname === '/me/strety/credentials' && method === 'GET') {
-    const user = users.find(u => u.id === sess.id);
-    if (!user) return json(res, 404, { error: 'User not found' });
-    const s = user.strety || {};
-    return json(res, 200, { clientId: s.clientId || '', clientSecret: s.clientSecret || '' });
-  }
-
   if (pathname === '/strety/push' && method === 'POST') {
     const user = users.find(u => u.id === sess.id);
     if (!user) return json(res, 404, { error: 'User not found' });
     try {
-      const b = JSON.parse((await readBody(req)).toString() || '{}');
-      const results = await pushToStrety(user, b.accessToken || null);
+      const results = await pushToStrety(user);
       return json(res, 200, { ok: true, results, lastPush: user.strety.lastPush });
     } catch (e) { return json(res, 500, { error: e.message }); }
   }

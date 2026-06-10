@@ -560,6 +560,13 @@ tr:hover td { background:var(--surface2); }
             <div class="formGroup"><label>Client ID</label><input id="stretyClientId" placeholder="Strety OAuth client ID"></div>
             <div class="formGroup"><label>Client Secret</label><input id="stretyClientSecret" type="password" placeholder="Leave blank to keep current"></div>
           </div>
+          <details style="margin-top:12px;margin-bottom:14px">
+            <summary style="cursor:pointer;font-size:13px;color:var(--muted);user-select:none">Cloudflare bypass <span id="cfCookieStatus"></span></summary>
+            <div style="margin-top:10px;padding:12px;background:var(--surface2);border-radius:var(--radius)">
+              <p style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.6">Strety uses Cloudflare which blocks server-to-server requests. To fix this: open <strong>2.strety.com</strong> in your browser, then open DevTools (F12) → Application → Cookies → <code>2.strety.com</code>, copy the <code>cf_clearance</code> cookie value and paste it below.</p>
+              <div class="formGroup"><label>cf_clearance cookie value</label><input id="stCfClearance" placeholder="Paste cf_clearance value here" autocomplete="off"></div>
+            </div>
+          </details>
           <button class="btn primary" onclick="saveStrety()">Save Credentials</button>
         </div>
         <div class="detailCard" style="margin-bottom:16px;max-width:680px">
@@ -1996,15 +2003,25 @@ async function loadStretyStatus() {
   document.getElementById('stretyAutoPush').checked    = !!r.autoPush;
   document.getElementById('stretyPushDay').value       = r.pushDay ?? 1;
   document.getElementById('stretyPushHour').value      = r.pushHour ?? 8;
+  const cfStatus = document.getElementById('cfCookieStatus');
+  if (cfStatus) cfStatus.textContent = r.hasCfCookie ? '✓ cookie set' : '(not set)';
+  if (cfStatus) cfStatus.style.color = r.hasCfCookie ? 'var(--success)' : 'var(--muted)';
 }
 async function saveStrety() {
   const clientId     = document.getElementById('stretyClientId').value.trim();
   const clientSecret = document.getElementById('stretyClientSecret').value;
+  const cfClearance  = document.getElementById('stCfClearance').value.trim();
   const body = {};
   if (clientId)     body.clientId     = clientId;
   if (clientSecret) body.clientSecret = clientSecret;
+  if (cfClearance !== '') body.cfClearance = cfClearance;
   const r = await api('PUT','/me/strety', body);
-  if (r?.ok) { document.getElementById('stretyClientSecret').value=''; toast('Strety credentials saved','success'); loadStretyStatus(); }
+  if (r?.ok) {
+    document.getElementById('stretyClientSecret').value = '';
+    document.getElementById('stCfClearance').value = '';
+    toast('Strety credentials saved','success');
+    loadStretyStatus();
+  }
 }
 async function saveStretySchedule() {
   const body = {
@@ -2017,28 +2034,8 @@ async function saveStretySchedule() {
 }
 async function stretyPushNow() {
   const res = document.getElementById('stretyPushResult');
-  res.textContent = 'Connecting to Strety…';
-  // Fetch OAuth token from the browser — bypasses Cloudflare bot detection
-  let accessToken = null;
-  try {
-    const creds = await api('GET', '/me/strety/credentials');
-    if (!creds?.clientId || !creds?.clientSecret) throw new Error('Credentials not configured');
-    res.textContent = 'Getting token…';
-    const tokenRes = await fetch('https://2.strety.com/oauth/token', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: creds.clientId, client_secret: creds.clientSecret }).toString(),
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) throw new Error(tokenData.error_description || tokenData.error || `HTTP ${tokenRes.status}`);
-    accessToken = tokenData.access_token;
-  } catch (e) {
-    res.textContent = 'Auth error: ' + e.message;
-    toast('Strety auth failed: ' + e.message, 'error');
-    return;
-  }
-  res.textContent = 'Pushing stats…';
-  const r = await api('POST', '/strety/push', { accessToken });
+  res.textContent = 'Pushing…';
+  const r = await api('POST', '/strety/push');
   if (!r) { res.textContent = 'Failed.'; return; }
   if (r.error) { res.textContent = 'Error: ' + r.error; toast('Strety push failed','error'); return; }
   const lines = r.results.map(x => `${x.key.replace(/_/g,' ')}: ${x.value}`).join('  ·  ');
