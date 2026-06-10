@@ -27,7 +27,6 @@ const DEFAULT_SETTINGS = {
   notify: { onCreate: true, onAssign: true, onComment: true, onStatus: true },
   ai:     { apiKey: '', model: 'claude-haiku-4-5-20251001' },
   google: { clientId: '', clientSecret: '', redirectUri: `http://localhost:${parseInt(process.argv[2])||3000}/auth/google/callback`, refreshToken: '', accessToken: '', tokenExpiry: 0 },
-  strety: { clientId: '', clientSecret: '', accessToken: '', tokenExpiry: 0, metricIds: {}, autoPush: false, pushDay: 1, pushHour: 8, lastPush: 0 },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -369,28 +368,33 @@ const STRETY_METRICS_DEF = [
   { key: 'avg_resolution_hours', name: 'Avg Resolution Time hrs (Imported)' },
 ];
 
-async function getStretyToken() {
-  const s = settings.strety;
+function getUserStrety(user) {
+  if (!user.strety) user.strety = {};
+  return user.strety;
+}
+
+async function getStretyToken(user) {
+  const s = getUserStrety(user);
   if (!s.clientId || !s.clientSecret) throw new Error('Strety credentials not configured');
   if (s.accessToken && s.tokenExpiry > Date.now() + 60000) return s.accessToken;
   const body = new URLSearchParams({
-    grant_type: 'client_credentials',
+    grant_type:    'client_credentials',
     client_id:     s.clientId,
     client_secret: s.clientSecret,
-    scope: 'write',
+    scope:         'write',
   }).toString();
   const r = await httpsReq('2.strety.com', '/oauth/token', 'POST',
     { 'content-type': 'application/x-www-form-urlencoded' }, body);
   if (r.body?.error) throw new Error(r.body.error_description || r.body.error);
   if (!r.body?.access_token) throw new Error(`Strety auth failed (HTTP ${r.status})`);
-  settings.strety.accessToken = r.body.access_token;
-  settings.strety.tokenExpiry = Date.now() + (r.body.expires_in || 3600) * 1000;
-  save(SETTINGS_FILE, settings);
-  return settings.strety.accessToken;
+  s.accessToken = r.body.access_token;
+  s.tokenExpiry = Date.now() + (r.body.expires_in || 3600) * 1000;
+  save(USERS_FILE, users);
+  return s.accessToken;
 }
 
-async function stretyReq(method, path, body) {
-  const token = await getStretyToken();
+async function stretyReq(user, method, path, body) {
+  const token = await getStretyToken(user);
   const bodyStr = body ? JSON.stringify(body) : '';
   const headers = { 'authorization': `Bearer ${token}`, 'accept': 'application/json' };
   if (bodyStr) headers['content-type'] = 'application/json';
@@ -421,53 +425,57 @@ function getTicketStats() {
   return { createdThisWeek, resolvedThisWeek, openTickets, slaBreaches, avgResHours };
 }
 
-async function ensureStretyMetrics() {
-  const metricIds = { ...(settings.strety.metricIds || {}) };
+async function ensureStretyMetrics(user) {
+  const s = getUserStrety(user);
+  const metricIds = { ...(s.metricIds || {}) };
   let changed = false;
   for (const m of STRETY_METRICS_DEF) {
     if (!metricIds[m.key]) {
-      const created = await stretyReq('POST', '/api/v1/metrics', { name: m.name });
+      const created = await stretyReq(user, 'POST', '/api/v1/metrics', { name: m.name });
       const id = created?.data?.id || created?.id;
       if (!id) throw new Error(`No ID returned when creating metric "${m.name}"`);
       metricIds[m.key] = id;
       changed = true;
     }
   }
-  if (changed) { settings.strety.metricIds = metricIds; save(SETTINGS_FILE, settings); }
+  if (changed) { s.metricIds = metricIds; save(USERS_FILE, users); }
   return metricIds;
 }
 
-async function pushToStrety() {
-  const metricIds = await ensureStretyMetrics();
-  const s = getTicketStats();
+async function pushToStrety(user) {
+  const metricIds = await ensureStretyMetrics(user);
+  const st = getTicketStats();
   const values = {
-    tickets_created:      s.createdThisWeek,
-    tickets_resolved:     s.resolvedThisWeek,
-    open_tickets:         s.openTickets,
-    sla_breaches:         s.slaBreaches,
-    avg_resolution_hours: s.avgResHours,
+    tickets_created:      st.createdThisWeek,
+    tickets_resolved:     st.resolvedThisWeek,
+    open_tickets:         st.openTickets,
+    sla_breaches:         st.slaBreaches,
+    avg_resolution_hours: st.avgResHours,
   };
   const results = [];
   for (const [key, value] of Object.entries(values)) {
     const id = metricIds[key];
     if (!id) continue;
-    await stretyReq('POST', `/api/v1/metrics/${id}/check_ins`, { value });
+    await stretyReq(user, 'POST', `/api/v1/metrics/${id}/check_ins`, { value });
     results.push({ key, value });
   }
-  settings.strety.lastPush = Date.now();
-  save(SETTINGS_FILE, settings);
+  getUserStrety(user).lastPush = Date.now();
+  save(USERS_FILE, users);
   return results;
 }
 
-// Weekly auto-push — checks every hour
+// Weekly auto-push — checks every hour, runs for each user with auto-push enabled
 setInterval(async () => {
-  if (!settings.strety?.autoPush || !settings.strety?.clientId || !settings.strety?.clientSecret) return;
   const now = new Date();
-  if (now.getDay() !== (settings.strety.pushDay ?? 1)) return;
-  if (now.getHours() !== (settings.strety.pushHour ?? 8)) return;
-  if (Date.now() - (settings.strety.lastPush || 0) < 23 * 3600000) return;
-  try { await pushToStrety(); console.log('[Strety] Auto-push completed'); }
-  catch (e) { console.error('[Strety] Auto-push failed:', e.message); }
+  for (const user of users) {
+    const s = user.strety;
+    if (!s?.autoPush || !s?.clientId || !s?.clientSecret) continue;
+    if (now.getDay() !== (s.pushDay ?? 1)) continue;
+    if (now.getHours() !== (s.pushHour ?? 8)) continue;
+    if (Date.now() - (s.lastPush || 0) < 23 * 3600000) continue;
+    try { await pushToStrety(user); console.log(`[Strety] Auto-push for ${user.username} completed`); }
+    catch (e) { console.error(`[Strety] Auto-push for ${user.username} failed:`, e.message); }
+  }
 }, 3600000);
 
 // ── Route handler ─────────────────────────────────────────────────────────
@@ -1083,9 +1091,6 @@ const server = http.createServer(async (req, res) => {
       if (safe.google?.refreshToken)   safe.google.refreshToken   = '••••••••';
       if (safe.google?.accessToken)    delete safe.google.accessToken;
       if (safe.google?.tokenExpiry)    delete safe.google.tokenExpiry;
-      if (safe.strety?.clientSecret)   safe.strety.clientSecret = '••••••••';
-      if (safe.strety?.accessToken)    delete safe.strety.accessToken;
-      if (safe.strety?.tokenExpiry)    delete safe.strety.tokenExpiry;
       return json(res, 200, safe);
     }
     if (method === 'PUT') {
@@ -1107,47 +1112,61 @@ const server = http.createServer(async (req, res) => {
         Object.assign(settings.google, rest);
         if (clientSecret && clientSecret !== '••••••••') settings.google.clientSecret = clientSecret;
       }
-      if (b.strety) {
-        const { clientSecret, ...rest } = b.strety;
-        const credChanged = clientSecret && clientSecret !== '••••••••' &&
-          clientSecret !== settings.strety.clientSecret;
-        Object.assign(settings.strety, rest);
-        if (clientSecret && clientSecret !== '••••••••') settings.strety.clientSecret = clientSecret;
-        if (credChanged) { settings.strety.accessToken = ''; settings.strety.tokenExpiry = 0; }
-      }
       save(SETTINGS_FILE, settings);
       return json(res, 200, { ok: true });
     }
   }
 
-  // ── Strety routes ────────────────────────────────────────────────────────
+  // ── Strety routes (per-user) ─────────────────────────────────────────────
 
-  if (pathname === '/strety/status' && method === 'GET') {
-    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
-    const s = settings.strety;
+  if (pathname === '/me/strety' && method === 'GET') {
+    const user = users.find(u => u.id === sess.id);
+    if (!user) return json(res, 404, { error: 'User not found' });
+    const s = user.strety || {};
     return json(res, 200, {
+      clientId:   s.clientId   || '',
       connected:  !!(s.clientId && s.clientSecret),
       hasMetrics: Object.keys(s.metricIds || {}).length === STRETY_METRICS_DEF.length,
-      metricIds:  s.metricIds || {},
-      lastPush:   s.lastPush || 0,
-      autoPush:   s.autoPush || false,
-      pushDay:    s.pushDay  ?? 1,
-      pushHour:   s.pushHour ?? 8,
+      lastPush:   s.lastPush   || 0,
+      autoPush:   s.autoPush   || false,
+      pushDay:    s.pushDay    ?? 1,
+      pushHour:   s.pushHour   ?? 8,
     });
   }
 
+  if (pathname === '/me/strety' && method === 'PUT') {
+    const user = users.find(u => u.id === sess.id);
+    if (!user) return json(res, 404, { error: 'User not found' });
+    const b = JSON.parse((await readBody(req)).toString() || '{}');
+    if (!user.strety) user.strety = {};
+    const s = user.strety;
+    if (b.clientId     !== undefined) s.clientId  = b.clientId;
+    if (b.clientSecret && b.clientSecret !== '••••••••') {
+      s.clientSecret = b.clientSecret;
+      s.accessToken  = '';
+      s.tokenExpiry  = 0;
+    }
+    if (b.autoPush  !== undefined) s.autoPush  = b.autoPush;
+    if (b.pushDay   !== undefined) s.pushDay   = b.pushDay;
+    if (b.pushHour  !== undefined) s.pushHour  = b.pushHour;
+    save(USERS_FILE, users);
+    return json(res, 200, { ok: true });
+  }
+
   if (pathname === '/strety/push' && method === 'POST') {
-    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    const user = users.find(u => u.id === sess.id);
+    if (!user) return json(res, 404, { error: 'User not found' });
     try {
-      const results = await pushToStrety();
-      return json(res, 200, { ok: true, results, lastPush: settings.strety.lastPush });
+      const results = await pushToStrety(user);
+      return json(res, 200, { ok: true, results, lastPush: user.strety.lastPush });
     } catch (e) { return json(res, 500, { error: e.message }); }
   }
 
   if (pathname === '/strety/metrics' && method === 'DELETE') {
-    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
-    settings.strety.metricIds = {};
-    save(SETTINGS_FILE, settings);
+    const user = users.find(u => u.id === sess.id);
+    if (!user) return json(res, 404, { error: 'User not found' });
+    if (user.strety) user.strety.metricIds = {};
+    save(USERS_FILE, users);
     return json(res, 200, { ok: true });
   }
 
