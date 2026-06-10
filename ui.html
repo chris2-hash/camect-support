@@ -2017,8 +2017,28 @@ async function saveStretySchedule() {
 }
 async function stretyPushNow() {
   const res = document.getElementById('stretyPushResult');
-  res.textContent = 'Pushing…';
-  const r = await api('POST','/strety/push');
+  res.textContent = 'Connecting to Strety…';
+  // Fetch OAuth token from the browser — bypasses Cloudflare bot detection
+  let accessToken = null;
+  try {
+    const creds = await api('GET', '/me/strety/credentials');
+    if (!creds?.clientId || !creds?.clientSecret) throw new Error('Credentials not configured');
+    res.textContent = 'Getting token…';
+    const tokenRes = await fetch('https://2.strety.com/oauth/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: creds.clientId, client_secret: creds.clientSecret }).toString(),
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) throw new Error(tokenData.error_description || tokenData.error || `HTTP ${tokenRes.status}`);
+    accessToken = tokenData.access_token;
+  } catch (e) {
+    res.textContent = 'Auth error: ' + e.message;
+    toast('Strety auth failed: ' + e.message, 'error');
+    return;
+  }
+  res.textContent = 'Pushing stats…';
+  const r = await api('POST', '/strety/push', { accessToken });
   if (!r) { res.textContent = 'Failed.'; return; }
   if (r.error) { res.textContent = 'Error: ' + r.error; toast('Strety push failed','error'); return; }
   const lines = r.results.map(x => `${x.key.replace(/_/g,' ')}: ${x.value}`).join('  ·  ');

@@ -392,8 +392,8 @@ async function getStretyToken(user) {
   return s.accessToken;
 }
 
-async function stretyReq(user, method, path, body) {
-  const token = await getStretyToken(user);
+async function stretyReq(user, method, path, body, token) {
+  if (!token) token = await getStretyToken(user);
   const bodyStr = body ? JSON.stringify(body) : '';
   const headers = { 'authorization': `Bearer ${token}`, 'accept': 'application/json' };
   if (bodyStr) headers['content-type'] = 'application/json';
@@ -425,13 +425,13 @@ function getTicketStats(username) {
   return { createdThisWeek, resolvedThisWeek, openTickets, slaBreaches, avgResHours };
 }
 
-async function ensureStretyMetrics(user) {
+async function ensureStretyMetrics(user, token) {
   const s = getUserStrety(user);
   const metricIds = { ...(s.metricIds || {}) };
   let changed = false;
   for (const m of STRETY_METRICS_DEF) {
     if (!metricIds[m.key]) {
-      const created = await stretyReq(user, 'POST', '/api/v1/metrics', { name: m.name });
+      const created = await stretyReq(user, 'POST', '/api/v1/metrics', { name: m.name }, token);
       const id = created?.data?.id || created?.id;
       if (!id) throw new Error(`No ID returned when creating metric "${m.name}"`);
       metricIds[m.key] = id;
@@ -442,8 +442,8 @@ async function ensureStretyMetrics(user) {
   return metricIds;
 }
 
-async function pushToStrety(user) {
-  const metricIds = await ensureStretyMetrics(user);
+async function pushToStrety(user, token) {
+  const metricIds = await ensureStretyMetrics(user, token);
   const st = getTicketStats(user.username);
   const values = {
     tickets_created:      st.createdThisWeek,
@@ -456,7 +456,7 @@ async function pushToStrety(user) {
   for (const [key, value] of Object.entries(values)) {
     const id = metricIds[key];
     if (!id) continue;
-    await stretyReq(user, 'POST', `/api/v1/metrics/${id}/check_ins`, { value });
+    await stretyReq(user, 'POST', `/api/v1/metrics/${id}/check_ins`, { value }, token);
     results.push({ key, value });
   }
   getUserStrety(user).lastPush = Date.now();
@@ -1157,11 +1157,19 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
+  if (pathname === '/me/strety/credentials' && method === 'GET') {
+    const user = users.find(u => u.id === sess.id);
+    if (!user) return json(res, 404, { error: 'User not found' });
+    const s = user.strety || {};
+    return json(res, 200, { clientId: s.clientId || '', clientSecret: s.clientSecret || '' });
+  }
+
   if (pathname === '/strety/push' && method === 'POST') {
     const user = users.find(u => u.id === sess.id);
     if (!user) return json(res, 404, { error: 'User not found' });
     try {
-      const results = await pushToStrety(user);
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      const results = await pushToStrety(user, b.accessToken || null);
       return json(res, 200, { ok: true, results, lastPush: user.strety.lastPush });
     } catch (e) { return json(res, 500, { error: e.message }); }
   }
