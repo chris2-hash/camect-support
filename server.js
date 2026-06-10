@@ -392,21 +392,19 @@ function getUserStrety(user) {
   return user.strety;
 }
 
-function stretyHeaders(user, extra) {
-  const s = getUserStrety(user);
-  const h = {
+function stretyHeaders(extra) {
+  return {
     'user-agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'accept':          'application/json, text/plain, */*',
     'accept-language': 'en-US,en;q=0.9',
     ...extra,
   };
-  if (s.cfClearance) h['cookie'] = `cf_clearance=${s.cfClearance}`;
-  return h;
 }
 
 async function getStretyToken(user) {
   const s = getUserStrety(user);
-  if (!s.clientId || !s.clientSecret) throw new Error('Strety credentials not configured');
+  if (s.apiToken) return s.apiToken;
+  if (!s.clientId || !s.clientSecret) throw new Error('Strety credentials not configured — add a Personal Access Token or OAuth credentials in My Strety');
   if (s.accessToken && s.tokenExpiry > Date.now() + 60000) return s.accessToken;
   const bodyStr = new URLSearchParams({
     grant_type:    'client_credentials',
@@ -414,7 +412,7 @@ async function getStretyToken(user) {
     client_secret: s.clientSecret,
   }).toString();
   const r = await curlReq('https://2.strety.com/oauth/token', 'POST',
-    stretyHeaders(user, { 'content-type': 'application/x-www-form-urlencoded' }), bodyStr);
+    stretyHeaders({ 'content-type': 'application/x-www-form-urlencoded' }), bodyStr);
   if (r.body?.error) throw new Error(r.body.error_description || r.body.error);
   if (!r.body?.access_token) {
     const detail = typeof r.body === 'string' ? r.body.slice(0, 300) : JSON.stringify(r.body);
@@ -429,7 +427,7 @@ async function getStretyToken(user) {
 async function stretyReq(user, method, path, body, token) {
   if (!token) token = await getStretyToken(user);
   const bodyStr = body ? JSON.stringify(body) : '';
-  const headers = stretyHeaders(user, { 'authorization': `Bearer ${token}`, 'accept': 'application/json' });
+  const headers = stretyHeaders({ 'authorization': `Bearer ${token}`, 'accept': 'application/json' });
   if (bodyStr) headers['content-type'] = 'application/json';
   const r = await curlReq(`https://2.strety.com${path}`, method, headers, bodyStr || undefined);
   if (r.status >= 400) throw new Error(`Strety API error ${r.status}: ${JSON.stringify(r.body)}`);
@@ -1162,14 +1160,14 @@ const server = http.createServer(async (req, res) => {
     if (!user) return json(res, 404, { error: 'User not found' });
     const s = user.strety || {};
     return json(res, 200, {
-      clientId:     s.clientId   || '',
-      connected:    !!(s.clientId && s.clientSecret),
-      hasCfCookie:  !!(s.cfClearance),
-      hasMetrics:   Object.keys(s.metricIds || {}).length === STRETY_METRICS_DEF.length,
-      lastPush:     s.lastPush   || 0,
-      autoPush:     s.autoPush   || false,
-      pushDay:      s.pushDay    ?? 1,
-      pushHour:     s.pushHour   ?? 8,
+      clientId:    s.clientId   || '',
+      connected:   !!(s.apiToken || (s.clientId && s.clientSecret)),
+      hasApiToken: !!(s.apiToken),
+      hasMetrics:  Object.keys(s.metricIds || {}).length === STRETY_METRICS_DEF.length,
+      lastPush:    s.lastPush   || 0,
+      autoPush:    s.autoPush   || false,
+      pushDay:     s.pushDay    ?? 1,
+      pushHour:    s.pushHour   ?? 8,
     });
   }
 
@@ -1179,13 +1177,13 @@ const server = http.createServer(async (req, res) => {
     const b = JSON.parse((await readBody(req)).toString() || '{}');
     if (!user.strety) user.strety = {};
     const s = user.strety;
-    if (b.clientId     !== undefined) s.clientId  = b.clientId;
+    if (b.apiToken && b.apiToken !== '••••••••') s.apiToken = b.apiToken;
+    if (b.clientId !== undefined) s.clientId = b.clientId;
     if (b.clientSecret && b.clientSecret !== '••••••••') {
       s.clientSecret = b.clientSecret;
       s.accessToken  = '';
       s.tokenExpiry  = 0;
     }
-    if (b.cfClearance !== undefined) { s.cfClearance = b.cfClearance; s.accessToken = ''; s.tokenExpiry = 0; }
     if (b.autoPush  !== undefined) s.autoPush  = b.autoPush;
     if (b.pushDay   !== undefined) s.pushDay   = b.pushDay;
     if (b.pushHour  !== undefined) s.pushHour  = b.pushHour;

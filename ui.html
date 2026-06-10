@@ -556,15 +556,17 @@ tr:hover td { background:var(--surface2); }
         <div class="detailCard" style="margin-bottom:16px;max-width:680px">
           <h4>Strety Credentials</h4>
           <p style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.6">Connect your personal Strety account to push weekly scorecard stats. Five metrics will be created in your account with "(Imported)" appended.</p>
-          <div class="formRow">
-            <div class="formGroup"><label>Client ID</label><input id="stretyClientId" placeholder="Strety OAuth client ID"></div>
-            <div class="formGroup"><label>Client Secret</label><input id="stretyClientSecret" type="password" placeholder="Leave blank to keep current"></div>
+          <div class="formGroup" style="margin-bottom:14px">
+            <label>Personal Access Token <span style="font-weight:400;color:var(--muted)">(recommended — check Strety Settings → API)</span></label>
+            <input id="stretyApiToken" type="password" placeholder="Paste token here — leave blank to keep current">
           </div>
-          <details style="margin-top:12px;margin-bottom:14px">
-            <summary style="cursor:pointer;font-size:13px;color:var(--muted);user-select:none">Cloudflare bypass <span id="cfCookieStatus"></span></summary>
-            <div style="margin-top:10px;padding:12px;background:var(--surface2);border-radius:var(--radius)">
-              <p style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.6">Strety uses Cloudflare which blocks server-to-server requests. To fix this: open <strong>2.strety.com</strong> in your browser, then open DevTools (F12) → Application → Cookies → <code>2.strety.com</code>, copy the <code>cf_clearance</code> cookie value and paste it below.</p>
-              <div class="formGroup"><label>cf_clearance cookie value</label><input id="stCfClearance" placeholder="Paste cf_clearance value here" autocomplete="off"></div>
+          <details style="margin-bottom:14px">
+            <summary style="cursor:pointer;font-size:13px;color:var(--muted);user-select:none">OAuth credentials (alternative)</summary>
+            <div style="margin-top:10px">
+              <div class="formRow">
+                <div class="formGroup"><label>Client ID</label><input id="stretyClientId" placeholder="Strety OAuth client ID"></div>
+                <div class="formGroup"><label>Client Secret</label><input id="stretyClientSecret" type="password" placeholder="Leave blank to keep current"></div>
+              </div>
             </div>
           </details>
           <button class="btn primary" onclick="saveStrety()">Save Credentials</button>
@@ -1991,34 +1993,32 @@ async function loadStretyStatus() {
   if (!r) return;
   const box = document.getElementById('stretyStatusBox');
   if (!r.connected) {
-    box.textContent = 'Not connected — enter credentials above.';
+    box.textContent = 'Not connected — enter a Personal Access Token or OAuth credentials above.';
     box.style.color = 'var(--muted)';
   } else {
     const lastPush = r.lastPush ? 'Last push: ' + fmtDate(r.lastPush) : 'Never pushed';
     const metrics  = r.hasMetrics ? '5 metrics ready' : 'Metrics not yet created (will be created on first push)';
-    box.innerHTML  = `<span style="color:var(--success)">&#10003; Connected</span> &nbsp;·&nbsp; ${metrics} &nbsp;·&nbsp; ${lastPush}`;
+    const authMethod = r.hasApiToken ? 'API token' : 'OAuth';
+    box.innerHTML  = `<span style="color:var(--success)">&#10003; Connected</span> <span style="color:var(--muted)">(${authMethod})</span> &nbsp;·&nbsp; ${metrics} &nbsp;·&nbsp; ${lastPush}`;
     box.style.color = '';
   }
   document.getElementById('stretyClientId').value      = r.clientId || '';
   document.getElementById('stretyAutoPush').checked    = !!r.autoPush;
   document.getElementById('stretyPushDay').value       = r.pushDay ?? 1;
   document.getElementById('stretyPushHour').value      = r.pushHour ?? 8;
-  const cfStatus = document.getElementById('cfCookieStatus');
-  if (cfStatus) cfStatus.textContent = r.hasCfCookie ? '✓ cookie set' : '(not set)';
-  if (cfStatus) cfStatus.style.color = r.hasCfCookie ? 'var(--success)' : 'var(--muted)';
 }
 async function saveStrety() {
+  const apiToken     = document.getElementById('stretyApiToken').value;
   const clientId     = document.getElementById('stretyClientId').value.trim();
   const clientSecret = document.getElementById('stretyClientSecret').value;
-  const cfClearance  = document.getElementById('stCfClearance').value.trim();
   const body = {};
+  if (apiToken)     body.apiToken     = apiToken;
   if (clientId)     body.clientId     = clientId;
   if (clientSecret) body.clientSecret = clientSecret;
-  if (cfClearance !== '') body.cfClearance = cfClearance;
   const r = await api('PUT','/me/strety', body);
   if (r?.ok) {
+    document.getElementById('stretyApiToken').value = '';
     document.getElementById('stretyClientSecret').value = '';
-    document.getElementById('stCfClearance').value = '';
     toast('Strety credentials saved','success');
     loadStretyStatus();
   }
