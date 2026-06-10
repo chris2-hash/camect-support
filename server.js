@@ -403,21 +403,22 @@ async function stretyReq(user, method, path, body) {
   return r.body;
 }
 
-function getTicketStats() {
+function getTicketStats(username) {
   const now = Date.now();
   const weekAgo = now - 7 * 24 * 3600000;
-  const createdThisWeek  = tickets.filter(t => t.ts >= weekAgo).length;
-  const resolvedThisWeek = tickets.filter(t =>
+  const mine = tickets.filter(t => t.assignedTo === username);
+  const createdThisWeek  = mine.filter(t => t.ts >= weekAgo).length;
+  const resolvedThisWeek = mine.filter(t =>
     (t.status === 'resolved' || t.status === 'closed') && t.updatedTs >= weekAgo).length;
-  const openTickets = tickets.filter(t =>
+  const openTickets = mine.filter(t =>
     t.status !== 'closed' && t.status !== 'resolved').length;
-  const slaBreaches = tickets.filter(t => {
+  const slaBreaches = mine.filter(t => {
     if (t.status === 'closed' || t.status === 'resolved') return false;
     if (t.ts < weekAgo) return false;
     const hours = settings.sla[t.priority] || 24;
     return (now - t.ts) / 3600000 > hours;
   }).length;
-  const resolved = tickets.filter(t =>
+  const resolved = mine.filter(t =>
     (t.status === 'resolved' || t.status === 'closed') && t.updatedTs >= weekAgo);
   const avgResHours = resolved.length > 0
     ? Math.round(resolved.reduce((s, t) => s + (t.updatedTs - t.ts) / 3600000, 0) / resolved.length)
@@ -444,7 +445,7 @@ async function ensureStretyMetrics(user) {
 
 async function pushToStrety(user) {
   const metricIds = await ensureStretyMetrics(user);
-  const st = getTicketStats();
+  const st = getTicketStats(user.username);
   const values = {
     tickets_created:      st.createdThisWeek,
     tickets_resolved:     st.resolvedThisWeek,
