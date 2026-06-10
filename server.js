@@ -1,13 +1,14 @@
 // Camect Support Ticketing
 // node server.js [port]
 
-const http   = require('http');
-const fs     = require('fs');
-const path   = require('path');
-const crypto = require('crypto');
-const net    = require('net');
-const tls    = require('tls');
-const https  = require('https');
+const http         = require('http');
+const fs           = require('fs');
+const path         = require('path');
+const crypto       = require('crypto');
+const net          = require('net');
+const tls          = require('tls');
+const https        = require('https');
+const { execFile } = require('child_process');
 
 const PORT           = parseInt(process.argv[2]) || 3000;
 const TICKETS_FILE   = path.join(__dirname, 'tickets.json');
@@ -327,6 +328,24 @@ function httpsReq(hostname, path, method, headers, bodyStr) {
   });
 }
 
+// Use curl for requests that need a real TLS fingerprint (e.g. Cloudflare-protected APIs)
+function curlReq(url, method, headers, bodyStr) {
+  return new Promise((resolve, reject) => {
+    const args = ['-s', '--max-time', '30', '-X', method, '-w', '\n__HTTPSTATUS__%{http_code}'];
+    for (const [k, v] of Object.entries(headers || {})) args.push('-H', `${k}: ${v}`);
+    if (bodyStr) args.push('--data-raw', bodyStr);
+    args.push(url);
+    execFile('curl', args, { timeout: 35000 }, (err, stdout) => {
+      if (err) return reject(new Error('curl failed: ' + err.message));
+      const match = stdout.match(/\n__HTTPSTATUS__(\d+)$/);
+      const status = match ? parseInt(match[1]) : 0;
+      const body = stdout.replace(/\n__HTTPSTATUS__\d+$/, '');
+      try { resolve({ status, body: JSON.parse(body) }); }
+      catch { resolve({ status, body }); }
+    });
+  });
+}
+
 async function refreshGoogleToken() {
   if (!settings.google.refreshToken) throw new Error('Gmail not connected');
   const body = new URLSearchParams({
@@ -389,17 +408,16 @@ async function getStretyToken(user) {
   const s = getUserStrety(user);
   if (!s.clientId || !s.clientSecret) throw new Error('Strety credentials not configured');
   if (s.accessToken && s.tokenExpiry > Date.now() + 60000) return s.accessToken;
-  const body = new URLSearchParams({
+  const bodyStr = new URLSearchParams({
     grant_type:    'client_credentials',
     client_id:     s.clientId,
     client_secret: s.clientSecret,
   }).toString();
-  const r = await httpsReq('2.strety.com', '/oauth/token', 'POST',
-    stretyHeaders(user, { 'content-type': 'application/x-www-form-urlencoded' }), body);
+  const r = await curlReq('https://2.strety.com/oauth/token', 'POST',
+    stretyHeaders(user, { 'content-type': 'application/x-www-form-urlencoded' }), bodyStr);
   if (r.body?.error) throw new Error(r.body.error_description || r.body.error);
   if (!r.body?.access_token) {
-    const detail = typeof r.body === 'string' ? r.body.slice(0, 200) : JSON.stringify(r.body);
-    if (r.status === 403) throw new Error('Cloudflare is blocking the request. Paste your cf_clearance cookie in My Strety settings (see instructions).');
+    const detail = typeof r.body === 'string' ? r.body.slice(0, 300) : JSON.stringify(r.body);
     throw new Error(`Strety auth failed (HTTP ${r.status}): ${detail}`);
   }
   s.accessToken = r.body.access_token;
@@ -413,7 +431,7 @@ async function stretyReq(user, method, path, body, token) {
   const bodyStr = body ? JSON.stringify(body) : '';
   const headers = stretyHeaders(user, { 'authorization': `Bearer ${token}`, 'accept': 'application/json' });
   if (bodyStr) headers['content-type'] = 'application/json';
-  const r = await httpsReq('2.strety.com', path, method, headers, bodyStr || undefined);
+  const r = await curlReq(`https://2.strety.com${path}`, method, headers, bodyStr || undefined);
   if (r.status >= 400) throw new Error(`Strety API error ${r.status}: ${JSON.stringify(r.body)}`);
   return r.body;
 }
