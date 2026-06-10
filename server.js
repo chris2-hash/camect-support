@@ -17,11 +17,13 @@ const CANNED_FILE    = path.join(__dirname, 'canned.json');
 const TEMPLATES_FILE = path.join(__dirname, 'templates.json');
 const SETTINGS_FILE  = path.join(__dirname, 'settings.json');
 const ATTACH_DIR     = path.join(__dirname, 'attachments');
+const HOLIDAYS_FILE  = path.join(__dirname, 'holidays.json');
+const LEAVES_FILE    = path.join(__dirname, 'leaves.json');
 const MAX_ATTACH     = 10 * 1024 * 1024;
 
 const DEFAULT_SETTINGS = {
   smtp:   { enabled: false, host: '', port: 587, secure: false, user: '', password: '', from: '' },
-  sla:    { urgent: 4, high: 8, normal: 24, low: 72 },
+  sla:    { urgent: 4, high: 8, normal: 24, low: 72, workStart: 9, workEnd: 17 },
   notify: { onCreate: true, onAssign: true, onComment: true, onStatus: true },
   ai:     { apiKey: '', model: 'claude-haiku-4-5-20251001' },
   google: { clientId: '', clientSecret: '', redirectUri: `http://localhost:${parseInt(process.argv[2])||3000}/auth/google/callback`, refreshToken: '', accessToken: '', tokenExpiry: 0 },
@@ -80,6 +82,8 @@ let users     = load(USERS_FILE);
 let customers = load(CUSTOMERS_FILE);
 let canned    = load(CANNED_FILE);
 let templates = load(TEMPLATES_FILE);
+let holidays  = load(HOLIDAYS_FILE);
+let leaves    = load(LEAVES_FILE);
 const rawSettings = load(SETTINGS_FILE, {});
 let settings = {
   smtp:   { ...DEFAULT_SETTINGS.smtp,   ...(rawSettings.smtp   || {}) },
@@ -577,6 +581,7 @@ const server = http.createServer(async (req, res) => {
       if (b.description !== undefined) t.description = b.description;
       if (b.category    !== undefined) t.category    = b.category;
       if (b.dueDate     !== undefined) t.dueDate     = b.dueDate || null;
+      if (b.coverAgent  !== undefined) t.coverAgent  = b.coverAgent || null;
       if (b.status   !== undefined && b.status   !== t.status)   { const p = t.status;    t.status   = b.status;    t.timeline.push(tl(sess, 'status_change',   `Status: ${p} → ${b.status}`));    notifyTicket('status', t).catch(()=>{}); }
       if (b.priority !== undefined && b.priority !== t.priority) { const p = t.priority;  t.priority = b.priority;  t.timeline.push(tl(sess, 'priority_change', `Priority: ${p} → ${b.priority}`)); }
       if (b.assignedTo !== undefined && b.assignedTo !== t.assignedTo) {
@@ -877,6 +882,59 @@ const server = http.createServer(async (req, res) => {
       if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
       if (users[idx].id === sess.id) return json(res, 400, { error: 'Cannot delete yourself' });
       users.splice(idx, 1); save(USERS_FILE, users);
+      return json(res, 200, { ok: true });
+    }
+  }
+
+  // ── Calendar ─────────────────────────────────────────────────────────────
+
+  if (pathname === '/calendar/holidays') {
+    if (method === 'GET') return json(res, 200, holidays);
+    if (method === 'POST') {
+      if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      if (!b.date || !b.name) return json(res, 400, { error: 'date and name required' });
+      const h = { id: uid(), date: b.date, name: b.name.trim(), ts: Date.now() };
+      holidays.push(h); save(HOLIDAYS_FILE, holidays);
+      return json(res, 201, h);
+    }
+  }
+  const mHoliday = pathname.match(/^\/calendar\/holidays\/([^/]+)$/);
+  if (mHoliday && method === 'DELETE') {
+    if (sess.role !== 'admin') return json(res, 403, { error: 'Admin only' });
+    holidays = holidays.filter(h => h.id !== mHoliday[1]);
+    save(HOLIDAYS_FILE, holidays);
+    return json(res, 200, { ok: true });
+  }
+
+  if (pathname === '/calendar/leaves') {
+    if (method === 'GET') return json(res, 200, leaves);
+    if (method === 'POST') {
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      if (!b.agentUsername || !b.startDate || !b.endDate) return json(res, 400, { error: 'agentUsername, startDate, endDate required' });
+      const l = { id: uid(), agentUsername: b.agentUsername, startDate: b.startDate, endDate: b.endDate, coverAgent: b.coverAgent||'', note: b.note||'', ts: Date.now() };
+      leaves.push(l); save(LEAVES_FILE, leaves);
+      return json(res, 201, l);
+    }
+  }
+  const mLeave = pathname.match(/^\/calendar\/leaves\/([^/]+)$/);
+  if (mLeave) {
+    const idx = leaves.findIndex(l => l.id === mLeave[1]);
+    if (method === 'PUT') {
+      if (idx === -1) return json(res, 404, { error: 'Not found' });
+      const b = JSON.parse((await readBody(req)).toString() || '{}');
+      const l = leaves[idx];
+      if (b.startDate  !== undefined) l.startDate  = b.startDate;
+      if (b.endDate    !== undefined) l.endDate    = b.endDate;
+      if (b.coverAgent !== undefined) l.coverAgent = b.coverAgent;
+      if (b.note       !== undefined) l.note       = b.note;
+      save(LEAVES_FILE, leaves);
+      return json(res, 200, l);
+    }
+    if (method === 'DELETE') {
+      const owner = idx !== -1 && leaves[idx].agentUsername === sess.username;
+      if (sess.role !== 'admin' && !owner) return json(res, 403, { error: 'Forbidden' });
+      if (idx !== -1) { leaves.splice(idx, 1); save(LEAVES_FILE, leaves); }
       return json(res, 200, { ok: true });
     }
   }

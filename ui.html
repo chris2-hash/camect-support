@@ -283,6 +283,7 @@ tr:hover td { background:var(--surface2); }
       <div class="navItem" data-view="tickets"><span class="ico">🎫</span> Tickets</div>
       <div class="navItem" data-view="customers"><span class="ico">👥</span> Customers</div>
       <div class="navItem admin-only" data-view="users"><span class="ico">👤</span> Users</div>
+      <div class="navItem admin-only" data-view="calendar"><span class="ico">📅</span> Calendar</div>
       <div class="navItem admin-only" data-view="settings"><span class="ico">⚙️</span> Settings</div>
     </div>
     <div class="navFooter">
@@ -430,7 +431,7 @@ tr:hover td { background:var(--surface2); }
         </div>
         <div id="tabSla" class="tabPanel">
           <div class="detailCard" style="margin-bottom:16px">
-            <h4>SLA Thresholds (hours until breach)</h4>
+            <h4>SLA Thresholds (business hours until breach)</h4>
             <div class="formRow">
               <div class="formGroup"><label>Urgent</label><input id="slaUrgent" type="number" min="1"></div>
               <div class="formGroup"><label>High</label><input id="slaHigh" type="number" min="1"></div>
@@ -438,6 +439,11 @@ tr:hover td { background:var(--surface2); }
             <div class="formRow">
               <div class="formGroup"><label>Normal</label><input id="slaNormal" type="number" min="1"></div>
               <div class="formGroup"><label>Low</label><input id="slaLow" type="number" min="1"></div>
+            </div>
+            <h4 style="margin-top:16px">Business Hours (Mon–Fri)</h4>
+            <div class="formRow">
+              <div class="formGroup"><label>Work day start (24h)</label><input id="slaWorkStart" type="number" min="0" max="23" placeholder="9"></div>
+              <div class="formGroup"><label>Work day end (24h)</label><input id="slaWorkEnd" type="number" min="1" max="24" placeholder="17"></div>
             </div>
             <button class="btn primary" onclick="saveSla()" style="margin-top:4px">Save SLA</button>
           </div>
@@ -508,6 +514,73 @@ tr:hover td { background:var(--surface2); }
           </div>
         </div>
       </div>
+
+      <!-- Calendar -->
+      <div id="calendarView" style="display:none">
+        <div class="tabBar">
+          <button class="tab active" onclick="setTab(this,'calTabHolidays')">Bank Holidays &amp; Closures</button>
+          <button class="tab" onclick="setTab(this,'calTabLeaves');loadLeaves()">Agent Leave</button>
+        </div>
+        <div id="calTabHolidays" class="tabPanel active">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+            <button class="btn primary" onclick="openHolidayModal()">+ Add Holiday</button>
+          </div>
+          <div class="detailCard">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Holidays added here are skipped when calculating SLA countdowns.</p>
+            <table><thead><tr><th>Date</th><th>Name</th><th></th></tr></thead>
+            <tbody id="holidayTableBody"></tbody></table>
+          </div>
+        </div>
+        <div id="calTabLeaves" class="tabPanel">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+            <button class="btn primary" onclick="openLeaveModal()">+ Add Leave</button>
+          </div>
+          <div class="detailCard">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:12px">When an agent is on leave, their tickets show a warning and a cover agent selector.</p>
+            <table><thead><tr><th>Agent</th><th>From</th><th>To</th><th>Cover Agent</th><th>Note</th><th></th></tr></thead>
+            <tbody id="leaveTableBody"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Holiday Modal ── -->
+<div class="overlay" id="holidayModal">
+  <div class="modal sm">
+    <div class="modalHead"><h3>Add Holiday / Closure</h3><button class="btn ghost sm" onclick="closeModal('holidayModal')">✕</button></div>
+    <div class="modalBody">
+      <div class="formGroup"><label>Date *</label><input id="hmDate" type="date"></div>
+      <div class="formGroup"><label>Name *</label><input id="hmName" placeholder="e.g. Christmas Day"></div>
+    </div>
+    <div class="modalFoot">
+      <button class="btn ghost" onclick="closeModal('holidayModal')">Cancel</button>
+      <button class="btn primary" onclick="saveHoliday()">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Leave Modal ── -->
+<div class="overlay" id="leaveModal">
+  <div class="modal sm">
+    <div class="modalHead"><h3 id="leaveModalTitle">Add Leave</h3><button class="btn ghost sm" onclick="closeModal('leaveModal')">✕</button></div>
+    <div class="modalBody">
+      <div class="formGroup"><label>Agent *</label>
+        <select id="lmAgent"></select>
+      </div>
+      <div class="formRow">
+        <div class="formGroup"><label>From *</label><input id="lmStart" type="date"></div>
+        <div class="formGroup"><label>To *</label><input id="lmEnd" type="date"></div>
+      </div>
+      <div class="formGroup"><label>Cover Agent</label>
+        <select id="lmCover"><option value="">None</option></select>
+      </div>
+      <div class="formGroup"><label>Note</label><input id="lmNote" placeholder="Optional note"></div>
+    </div>
+    <div class="modalFoot">
+      <button class="btn ghost" onclick="closeModal('leaveModal')">Cancel</button>
+      <button class="btn primary" onclick="saveLeave()">Save</button>
     </div>
   </div>
 </div>
@@ -672,9 +745,11 @@ let selectedTicketIds = new Set();
 let detailTicket = null;
 let editingTicketId = null;
 let editingCustId = null, editingUserId = null, editingCannedId = null, editingTplId = null;
+let editingLeaveId = null;
 let custFocusIdx = -1, custOptions = [];
 let sseSource = null;
-let slaConfig = { urgent:4, high:8, normal:24, low:72 };
+let slaConfig = { urgent:4, high:8, normal:24, low:72, workStart:9, workEnd:17 };
+let holidays = [], leaves = [];
 
 // ── Theme ──────────────────────────────────────────────────────────────────
 function applyTheme(light) {
@@ -720,15 +795,44 @@ async function api(method, url, body) {
 }
 
 // ── SLA ────────────────────────────────────────────────────────────────────
+function businessHoursElapsed(fromTs) {
+  const wStart = slaConfig.workStart ?? 9;
+  const wEnd   = slaConfig.workEnd   ?? 17;
+  const holidaySet = new Set((holidays||[]).map(h => h.date));
+  let cursor = new Date(fromTs);
+  const now  = new Date();
+  if (cursor >= now) return 0;
+  let elapsed = 0;
+  while (cursor < now) {
+    const dow = cursor.getDay();
+    const yyyy = cursor.getFullYear(), mm = String(cursor.getMonth()+1).padStart(2,'0'), dd = String(cursor.getDate()).padStart(2,'0');
+    const dateStr = `${yyyy}-${mm}-${dd}`;
+    const dayStart = new Date(cursor); dayStart.setHours(wStart,0,0,0);
+    const dayEnd   = new Date(cursor); dayEnd.setHours(wEnd,0,0,0);
+    const nextDay  = new Date(cursor); nextDay.setDate(nextDay.getDate()+1); nextDay.setHours(wStart,0,0,0);
+    if (dow !== 0 && dow !== 6 && !holidaySet.has(dateStr)) {
+      const from = cursor < dayStart ? dayStart : cursor;
+      const to   = now   < dayEnd   ? now      : dayEnd;
+      if (from < to) elapsed += to - from;
+    }
+    cursor = nextDay;
+  }
+  return elapsed / 3600000;
+}
 function slaStatus(ticket) {
   if (ticket.status === 'resolved' || ticket.status === 'closed') return null;
   const hours = slaConfig[ticket.priority] || 24;
-  const elapsed = (Date.now() - ticket.ts) / 3600000;
+  const elapsed = businessHoursElapsed(ticket.ts);
   const pct = Math.min(elapsed / hours * 100, 100);
   const remaining = hours - elapsed;
   if (pct >= 100) return { label:'SLA Breached', color:'#e05252' };
   if (pct >= 75)  return { label:Math.ceil(remaining)+'h left', color:'#f0a832' };
   return { label:Math.ceil(remaining)+'h left', color:'#4caf7d' };
+}
+function agentOnLeave(username) {
+  if (!username) return null;
+  const today = new Date().toISOString().slice(0,10);
+  return (leaves||[]).find(l => l.agentUsername === username && l.startDate <= today && l.endDate >= today) || null;
 }
 
 // ── Auth ───────────────────────────────────────────────────────────────────
@@ -766,13 +870,13 @@ async function checkSession() {
 
 // ── Nav ────────────────────────────────────────────────────────────────────
 function showView(name) {
-  ['dashboard','tickets','customers','users','settings'].forEach(v => {
+  ['dashboard','tickets','customers','users','calendar','settings'].forEach(v => {
     document.getElementById(v+'View').style.display = v===name ? '' : 'none';
   });
   document.getElementById('ticketDetail').style.display='none';
   detailTicket = null;
   document.querySelectorAll('.navItem').forEach(n => n.classList.toggle('active', n.dataset.view===name));
-  const titles = { dashboard:'Dashboard', tickets:'Tickets', customers:'Customers', users:'Users', settings:'Settings' };
+  const titles = { dashboard:'Dashboard', tickets:'Tickets', customers:'Customers', users:'Users', calendar:'Calendar', settings:'Settings' };
   document.getElementById('pageTitle').textContent = titles[name]||name;
   document.getElementById('topbarActions').innerHTML='';
   if (name==='tickets')   loadTickets();
@@ -780,6 +884,7 @@ function showView(name) {
   if (name==='users')     loadUsers();
   if (name==='settings')  loadSettings();
   if (name==='dashboard') loadDashboard();
+  if (name==='calendar')  loadCalendar();
 }
 document.querySelectorAll('.navItem').forEach(el => {
   el.addEventListener('click', () => showView(el.dataset.view));
@@ -891,6 +996,7 @@ function ticketRowHtml(t, showCheck) {
   const s = slaStatus(t);
   const overdue = t.dueDate && t.status!=='closed' && t.status!=='resolved' && new Date(t.dueDate)<new Date();
   const checked = selectedTicketIds.has(t.id);
+  const onLeave = agentOnLeave(t.assignedTo);
   return `<div class="ticketRow${checked?' checked':''}" data-id="${t.id}">
     ${showCheck?`<input class="chk" type="checkbox" ${checked?'checked':''}>`:'' }
     <div class="ticketInfo">
@@ -901,6 +1007,7 @@ function ticketRowHtml(t, showCheck) {
         <span class="badge ${t.priority}">${fmt(t.priority)}</span>
         ${t.customerName?`<span style="font-size:11px;color:var(--muted)">${esc(t.customerName)}</span>`:''}
         ${t.assignedTo?`<span style="font-size:11px;color:var(--muted)">→ ${esc(t.assignedTo)}</span>`:''}
+        ${onLeave?`<span style="font-size:11px;background:color-mix(in srgb,#f0a832 15%,transparent);color:#f0a832;padding:1px 6px;border-radius:4px">⚠ On Leave</span>`:''}
         ${s?`<span class="slaBadge" style="background:color-mix(in srgb,${s.color} 15%,transparent);color:${s.color}">${esc(s.label)}</span>`:''}
         ${overdue?'<span class="overdue">⏰ OVERDUE</span>':''}
       </div>
@@ -1063,11 +1170,13 @@ function renderDetail(t) {
             <span class="metaVal"><select onchange="patchTicket({priority:this.value})">
               ${['urgent','high','normal','low'].map(v=>`<option ${t.priority===v?'selected':''} value="${v}">${fmt(v)}</option>`).join('')}
             </select></span></div>
+          ${(()=>{ const ol=agentOnLeave(t.assignedTo); return ol?`<div style="padding:8px 10px;background:color-mix(in srgb,#f0a832 12%,transparent);border:1px solid color-mix(in srgb,#f0a832 40%,transparent);border-radius:var(--radius);margin-bottom:8px;font-size:12px;color:#f0a832">⚠ ${esc(t.assignedTo)} is on leave until ${esc(ol.endDate)}</div>`:'' })()}
           <div class="metaRow"><span class="metaLabel">Assigned To</span>
             <span class="metaVal"><select onchange="patchTicket({assignedTo:this.value})">
               <option value="">Unassigned</option>
               ${users.map(u=>`<option ${t.assignedTo===u.username?'selected':''} value="${u.username}">${esc(u.displayName)}</option>`).join('')}
             </select></span></div>
+          ${(()=>{ const ol=agentOnLeave(t.assignedTo); if(!ol) return ''; return `<div class="metaRow"><span class="metaLabel">Cover Agent</span><span class="metaVal"><select onchange="patchTicket({coverAgent:this.value})"><option value="">None</option>${users.map(u=>`<option ${(t.coverAgent||ol.coverAgent)===u.username?'selected':''} value="${u.username}">${esc(u.displayName)}</option>`).join('')}</select></span></div>`; })()}
           <div class="metaRow"><span class="metaLabel">Category</span>
             <span class="metaVal"><select onchange="patchTicket({category:this.value})">
               ${['hardware','software','network','billing','other'].map(v=>`<option ${t.category===v?'selected':''} value="${v}">${fmt(v)}</option>`).join('')}
@@ -1423,10 +1532,12 @@ async function loadSettings() {
   document.getElementById('smtpPass').value  ='';
   document.getElementById('smtpFrom').value  =r.smtp.from||'';
   document.getElementById('smtpSecure').checked=!!r.smtp.secure;
-  document.getElementById('slaUrgent').value =r.sla.urgent;
-  document.getElementById('slaHigh').value   =r.sla.high;
-  document.getElementById('slaNormal').value =r.sla.normal;
-  document.getElementById('slaLow').value    =r.sla.low;
+  document.getElementById('slaUrgent').value    =r.sla.urgent;
+  document.getElementById('slaHigh').value      =r.sla.high;
+  document.getElementById('slaNormal').value    =r.sla.normal;
+  document.getElementById('slaLow').value       =r.sla.low;
+  document.getElementById('slaWorkStart').value =r.sla.workStart??9;
+  document.getElementById('slaWorkEnd').value   =r.sla.workEnd??17;
   document.getElementById('notifyCreate').checked =!!r.notify.onCreate;
   document.getElementById('notifyAssign').checked =!!r.notify.onAssign;
   document.getElementById('notifyComment').checked=!!r.notify.onComment;
@@ -1462,10 +1573,12 @@ async function testEmail() {
 }
 async function saveSla() {
   const body={sla:{
-    urgent:parseInt(document.getElementById('slaUrgent').value)||4,
-    high:  parseInt(document.getElementById('slaHigh').value)||8,
-    normal:parseInt(document.getElementById('slaNormal').value)||24,
-    low:   parseInt(document.getElementById('slaLow').value)||72,
+    urgent:    parseInt(document.getElementById('slaUrgent').value)||4,
+    high:      parseInt(document.getElementById('slaHigh').value)||8,
+    normal:    parseInt(document.getElementById('slaNormal').value)||24,
+    low:       parseInt(document.getElementById('slaLow').value)||72,
+    workStart: parseInt(document.getElementById('slaWorkStart').value)??9,
+    workEnd:   parseInt(document.getElementById('slaWorkEnd').value)??17,
   }};
   const r=await api('PUT','/settings',body);
   if (r) { slaConfig=body.sla; toast('SLA settings saved','success'); }
@@ -1723,6 +1836,119 @@ document.querySelectorAll('.overlay').forEach(ov => {
   ov.addEventListener('click', e => { if(e.target===ov) closeModal(ov.id); });
 });
 
+// ── Calendar ───────────────────────────────────────────────────────────────
+async function loadCalendar() {
+  const [hData, lData] = await Promise.all([
+    api('GET','/calendar/holidays'), api('GET','/calendar/leaves')
+  ]);
+  if (hData) { holidays=hData; renderHolidayTable(); }
+  if (lData) { leaves=lData; renderLeaveTable(); }
+}
+async function loadLeaves() {
+  const data = await api('GET','/calendar/leaves');
+  if (data) { leaves=data; renderLeaveTable(); }
+}
+function renderHolidayTable() {
+  const sorted = [...holidays].sort((a,b)=>a.date.localeCompare(b.date));
+  document.getElementById('holidayTableBody').innerHTML = sorted.length
+    ? sorted.map(h=>`<tr>
+        <td>${esc(h.date)}</td>
+        <td>${esc(h.name)}</td>
+        <td><button class="btn danger-ghost sm" onclick="deleteHoliday('${h.id}')">Delete</button></td>
+      </tr>`).join('')
+    : '<tr><td colspan="3" class="empty">No holidays added yet.</td></tr>';
+}
+function renderLeaveTable() {
+  const sorted = [...leaves].sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  document.getElementById('leaveTableBody').innerHTML = sorted.length
+    ? sorted.map(l=>{
+        const u=users.find(u=>u.username===l.agentUsername);
+        const cv=users.find(u=>u.username===l.coverAgent);
+        return `<tr>
+          <td>${esc(u?.displayName||l.agentUsername)}</td>
+          <td>${esc(l.startDate)}</td>
+          <td>${esc(l.endDate)}</td>
+          <td>${esc(cv?.displayName||l.coverAgent||'—')}</td>
+          <td>${esc(l.note||'')}</td>
+          <td style="white-space:nowrap">
+            <button class="btn ghost sm" onclick="openLeaveModal('${l.id}')">Edit</button>
+            <button class="btn danger-ghost sm" onclick="deleteLeave('${l.id}')">Delete</button>
+          </td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="6" class="empty">No leave entries yet.</td></tr>';
+}
+function openHolidayModal() {
+  document.getElementById('hmDate').value=new Date().toISOString().slice(0,10);
+  document.getElementById('hmName').value='';
+  openModal('holidayModal');
+}
+async function saveHoliday() {
+  const date=document.getElementById('hmDate').value;
+  const name=document.getElementById('hmName').value.trim();
+  if (!date||!name) { toast('Date and name required','error'); return; }
+  const r=await api('POST','/calendar/holidays',{date,name});
+  if (!r) return;
+  holidays.push(r); renderHolidayTable();
+  closeModal('holidayModal'); toast('Holiday added','success');
+}
+async function deleteHoliday(id) {
+  if (!confirm('Delete this holiday?')) return;
+  await api('DELETE','/calendar/holidays/'+id);
+  holidays=holidays.filter(h=>h.id!==id); renderHolidayTable();
+}
+function openLeaveModal(id) {
+  editingLeaveId=id||null;
+  document.getElementById('leaveModalTitle').textContent=id?'Edit Leave':'Add Leave';
+  const lmAgent=document.getElementById('lmAgent');
+  const lmCover=document.getElementById('lmCover');
+  const agents=users.filter(u=>u.role==='agent'||u.role==='admin');
+  lmAgent.innerHTML=agents.map(u=>`<option value="${u.username}">${esc(u.displayName)}</option>`).join('');
+  lmCover.innerHTML='<option value="">None</option>'+agents.map(u=>`<option value="${u.username}">${esc(u.displayName)}</option>`).join('');
+  if (id) {
+    const l=leaves.find(x=>x.id===id);
+    if (l) {
+      lmAgent.value=l.agentUsername;
+      document.getElementById('lmStart').value=l.startDate;
+      document.getElementById('lmEnd').value=l.endDate;
+      lmCover.value=l.coverAgent||'';
+      document.getElementById('lmNote').value=l.note||'';
+    }
+  } else {
+    const today=new Date().toISOString().slice(0,10);
+    document.getElementById('lmStart').value=today;
+    document.getElementById('lmEnd').value=today;
+    document.getElementById('lmNote').value='';
+    if (lmAgent.options.length) lmAgent.selectedIndex=0;
+    lmCover.value='';
+  }
+  openModal('leaveModal');
+}
+async function saveLeave() {
+  const agentUsername=document.getElementById('lmAgent').value;
+  const startDate=document.getElementById('lmStart').value;
+  const endDate=document.getElementById('lmEnd').value;
+  const coverAgent=document.getElementById('lmCover').value;
+  const note=document.getElementById('lmNote').value.trim();
+  if (!agentUsername||!startDate||!endDate) { toast('Agent and dates required','error'); return; }
+  if (endDate<startDate) { toast('End date must be on or after start date','error'); return; }
+  let r;
+  if (editingLeaveId) {
+    r=await api('PUT','/calendar/leaves/'+editingLeaveId,{startDate,endDate,coverAgent,note});
+    if (r) { const idx=leaves.findIndex(l=>l.id===editingLeaveId); if(idx!==-1) leaves[idx]=r; }
+  } else {
+    r=await api('POST','/calendar/leaves',{agentUsername,startDate,endDate,coverAgent,note});
+    if (r) leaves.push(r);
+  }
+  if (!r) return;
+  renderLeaveTable(); closeModal('leaveModal'); toast('Leave saved','success');
+}
+async function deleteLeave(id) {
+  if (!confirm('Delete this leave entry?')) return;
+  await api('DELETE','/calendar/leaves/'+id);
+  leaves=leaves.filter(l=>l.id!==id); renderLeaveTable();
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 async function initApp() {
   document.getElementById('navName').textContent=me.displayName||me.username;
@@ -1730,13 +1956,16 @@ async function initApp() {
   document.querySelectorAll('.admin-only').forEach(el => {
     el.style.display=me.role==='admin'?'':'none';
   });
-  const [usersData,custsData,cannedData,tplData]=await Promise.all([
+  const [usersData,custsData,cannedData,tplData,holData,leaveData]=await Promise.all([
     api('GET','/users'), api('GET','/customers'), api('GET','/canned'), api('GET','/templates'),
+    api('GET','/calendar/holidays'), api('GET','/calendar/leaves'),
   ]);
   if (usersData)  users    =usersData;
   if (custsData)  customers=custsData;
   if (cannedData) canned   =cannedData;
   if (tplData)    templates=tplData;
+  if (holData)   holidays  =holData;
+  if (leaveData) leaves    =leaveData;
   if (me.role==='admin') {
     const s=await api('GET','/settings');
     if (s?.sla) slaConfig=s.sla;
