@@ -119,6 +119,36 @@ function getSession(req) {
   return m ? (sessions[m[1]] || null) : null;
 }
 
+async function resolveViaSSO(req, res) {
+  if ((req.headers.cookie || '').match(/session=[a-f0-9]+/)) return;
+  const m = (req.headers.cookie || '').match(/camect_auth=([^;]+)/);
+  if (!m) return;
+  try {
+    const me = await new Promise((resolve, reject) => {
+      const r = http.get({ hostname: 'localhost', port: 8000, path: '/api/me',
+        headers: { cookie: `camect_auth=${m[1]}` } }, resp => {
+        let d = ''; resp.on('data', c => d += c);
+        resp.on('end', () => resp.statusCode === 200 ? resolve(JSON.parse(d)) : reject());
+      });
+      r.on('error', reject);
+      r.setTimeout(3000, () => reject(new Error('timeout')));
+    });
+    let user = users.find(u => u.username === me.username);
+    if (!user) {
+      user = { id: uid(), username: me.username, passwordHash: hashPassword(uid()),
+               role: me.role === 'admin' ? 'admin' : 'agent',
+               displayName: me.username, email: '', ts: Date.now() };
+      users.push(user); save(USERS_FILE, users);
+    } else if (me.role === 'admin' && user.role !== 'admin') {
+      user.role = 'admin'; save(USERS_FILE, users);
+    }
+    const token = createSession(user);
+    const prev = res.getHeader('Set-Cookie');
+    res.setHeader('Set-Cookie', [...(prev ? [].concat(prev) : []),
+      `session=${token}; Path=/; HttpOnly; SameSite=Strict`]);
+  } catch {}
+}
+
 // ── SSE ───────────────────────────────────────────────────────────────────
 
 function ssePublish(type, data) {
@@ -516,6 +546,8 @@ const server = http.createServer(async (req, res) => {
   const parsed   = new URL(req.url, 'http://localhost');
   const pathname = parsed.pathname;
   const method   = req.method;
+
+  await resolveViaSSO(req, res);
 
   if (pathname === '/' || pathname === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
