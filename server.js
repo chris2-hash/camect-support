@@ -149,7 +149,7 @@ async function syncUsersFromCamectAuth(camectToken) {
 }
 
 async function resolveViaSSO(req, res) {
-  if ((req.headers.cookie || '').match(/session=[a-f0-9]+/)) return;
+  if (getSession(req)) return;
   const m = (req.headers.cookie || '').match(/camect_auth=([^;]+)/);
   if (!m) return;
   try {
