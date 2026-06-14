@@ -119,6 +119,35 @@ function getSession(req) {
   return m ? (sessions[m[1]] || null) : null;
 }
 
+let lastUserSync = 0;
+
+async function syncUsersFromCamectAuth(camectToken) {
+  if (Date.now() - lastUserSync < 5 * 60 * 1000) return;
+  lastUserSync = Date.now();
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const r = http.get({ hostname: 'localhost', port: 8000, path: '/admin/users',
+        headers: { cookie: `camect_auth=${camectToken}` } }, resp => {
+        let d = ''; resp.on('data', c => d += c);
+        resp.on('end', () => resp.statusCode === 200 ? resolve(JSON.parse(d)) : reject());
+      });
+      r.on('error', reject);
+      r.setTimeout(3000, () => reject(new Error('timeout')));
+    });
+    let changed = false;
+    for (const cu of data) {
+      if (cu.role !== 'admin' && !(cu.apps || []).includes('support')) continue;
+      if (!users.find(u => u.username === cu.username)) {
+        users.push({ id: uid(), username: cu.username, passwordHash: hashPassword(uid()),
+          role: cu.role === 'admin' ? 'admin' : 'agent',
+          displayName: cu.username, email: '', ts: Date.now() });
+        changed = true;
+      }
+    }
+    if (changed) { save(USERS_FILE, users); console.log('[SSO] Synced users from camect-auth'); }
+  } catch (e) { console.error('[SSO] User sync failed:', e.message); }
+}
+
 async function resolveViaSSO(req, res) {
   if ((req.headers.cookie || '').match(/session=[a-f0-9]+/)) return;
   const m = (req.headers.cookie || '').match(/camect_auth=([^;]+)/);
@@ -146,6 +175,7 @@ async function resolveViaSSO(req, res) {
     const prev = res.getHeader('Set-Cookie');
     res.setHeader('Set-Cookie', [...(prev ? [].concat(prev) : []),
       `session=${token}; Path=/; HttpOnly; SameSite=Strict`]);
+    if (me.role === 'admin') syncUsersFromCamectAuth(m[1]).catch(() => {});
   } catch {}
 }
 
